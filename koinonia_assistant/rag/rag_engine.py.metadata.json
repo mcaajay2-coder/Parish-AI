@@ -1,0 +1,4 @@
+{
+  "summary": "Text-to-SQL RAG pipeline using LangGraph, pgvector, and Groq for KOINONIA sacrament data.",
+  "updatedAt": "2026-08-11T06:10:52.321708100Z"
+}

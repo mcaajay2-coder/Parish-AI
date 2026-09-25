@@ -1,0 +1,437 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "creation": "2026-08-11 11:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "active",
+  "mrg_register_ref",
+  "mrg_date",
+  "mrg_minister",
+  "parish_priest",
+  "mrg_place",
+  "family_card_no",
+  "mrg_parish_id",
+  "mrg_church",
+  "diocese_id",
+  "vicariate_id",
+  "parish_id",
+  "bridegroom_parish_id",
+  "bridegroom_name",
+  "bridegroom_middle_name",
+  "bridegroom_last_name",
+  "is_dob_or_age_bridegroom",
+  "bridegroom_dob",
+  "bridegroom_mrg_age",
+  "bridegroom_status",
+  "bridegroom_religion_id",
+  "bridegroom_bapt_date",
+  "bridegroom_bapt_church",
+  "bridegroom_fhc_date",
+  "bridegroom_fhc_church",
+  "bridegroom_domicile",
+  "bridegroom_occupation",
+  "bridegroom_taluk",
+  "bridegroom_residential_address",
+  "bridegroom_country_id",
+  "bridegroom_father_name",
+  "bridegroom_mother_name",
+  "is_bridegroom_course_attended",
+  "bride_parish_id",
+  "bride_name",
+  "bride_middle_name",
+  "bride_last_name",
+  "is_dob_or_age_bride",
+  "bride_dob",
+  "bride_mrg_age",
+  "bride_status",
+  "bride_religion_id",
+  "bride_bapt_date",
+  "bride_bapt_church",
+  "bride_fhc_date",
+  "bride_fhc_church",
+  "bride_domicile",
+  "bride_occupation",
+  "bride_taluk",
+  "bride_residential_address",
+  "bride_country_id",
+  "bride_father_name",
+  "bride_mother_name",
+  "is_bride_course_attended",
+  "witness1_name",
+  "witness1_surname",
+  "witness1_age",
+  "witness1_profession",
+  "witness1_address",
+  "witness2_name",
+  "witness2_surname",
+  "witness2_age",
+  "witness2_profession",
+  "witness2_address",
+  "banns",
+  "bann_date1",
+  "note"
+ ],
+ "fields": [
+  {
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active"
+  },
+  {
+   "fieldname": "mrg_register_ref",
+   "fieldtype": "Data",
+   "label": "Mrg Register Ref"
+  },
+  {
+   "fieldname": "mrg_date",
+   "fieldtype": "Date",
+   "label": "Mrg Date"
+  },
+  {
+   "fieldname": "mrg_minister",
+   "fieldtype": "Data",
+   "label": "Mrg Minister"
+  },
+  {
+   "fieldname": "parish_priest",
+   "fieldtype": "Data",
+   "label": "Parish Priest"
+  },
+  {
+   "fieldname": "mrg_place",
+   "fieldtype": "Data",
+   "label": "Mrg Place"
+  },
+  {
+   "fieldname": "family_card_no",
+   "fieldtype": "Data",
+   "label": "Family Card No"
+  },
+  {
+   "fieldname": "mrg_parish_id",
+   "fieldtype": "Data",
+   "label": "Mrg Parish Id"
+  },
+  {
+   "fieldname": "mrg_church",
+   "fieldtype": "Data",
+   "label": "Mrg Church"
+  },
+  {
+   "fieldname": "diocese_id",
+   "fieldtype": "Data",
+   "label": "Diocese Id"
+  },
+  {
+   "fieldname": "vicariate_id",
+   "fieldtype": "Data",
+   "label": "Vicariate Id"
+  },
+  {
+   "fieldname": "parish_id",
+   "fieldtype": "Data",
+   "label": "Parish Id"
+  },
+  {
+   "fieldname": "bridegroom_parish_id",
+   "fieldtype": "Data",
+   "label": "Bridegroom Parish Id"
+  },
+  {
+   "fieldname": "bridegroom_name",
+   "fieldtype": "Data",
+   "label": "Bridegroom Name"
+  },
+  {
+   "fieldname": "bridegroom_middle_name",
+   "fieldtype": "Data",
+   "label": "Bridegroom Middle Name"
+  },
+  {
+   "fieldname": "bridegroom_last_name",
+   "fieldtype": "Data",
+   "label": "Bridegroom Last Name"
+  },
+  {
+   "fieldname": "is_dob_or_age_bridegroom",
+   "fieldtype": "Data",
+   "label": "Is Dob Or Age Bridegroom"
+  },
+  {
+   "fieldname": "bridegroom_dob",
+   "fieldtype": "Date",
+   "label": "Bridegroom Dob"
+  },
+  {
+   "fieldname": "bridegroom_mrg_age",
+   "fieldtype": "Int",
+   "label": "Bridegroom Mrg Age"
+  },
+  {
+   "fieldname": "bridegroom_status",
+   "fieldtype": "Data",
+   "label": "Bridegroom Status"
+  },
+  {
+   "fieldname": "bridegroom_religion_id",
+   "fieldtype": "Data",
+   "label": "Bridegroom Religion Id"
+  },
+  {
+   "fieldname": "bridegroom_bapt_date",
+   "fieldtype": "Date",
+   "label": "Bridegroom Bapt Date"
+  },
+  {
+   "fieldname": "bridegroom_bapt_church",
+   "fieldtype": "Data",
+   "label": "Bridegroom Bapt Church"
+  },
+  {
+   "fieldname": "bridegroom_fhc_date",
+   "fieldtype": "Date",
+   "label": "Bridegroom Fhc Date"
+  },
+  {
+   "fieldname": "bridegroom_fhc_church",
+   "fieldtype": "Data",
+   "label": "Bridegroom Fhc Church"
+  },
+  {
+   "fieldname": "bridegroom_domicile",
+   "fieldtype": "Data",
+   "label": "Bridegroom Domicile"
+  },
+  {
+   "fieldname": "bridegroom_occupation",
+   "fieldtype": "Data",
+   "label": "Bridegroom Occupation"
+  },
+  {
+   "fieldname": "bridegroom_taluk",
+   "fieldtype": "Data",
+   "label": "Bridegroom Taluk"
+  },
+  {
+   "fieldname": "bridegroom_residential_address",
+   "fieldtype": "Data",
+   "label": "Bridegroom Residential Address"
+  },
+  {
+   "fieldname": "bridegroom_country_id",
+   "fieldtype": "Data",
+   "label": "Bridegroom Country Id"
+  },
+  {
+   "fieldname": "bridegroom_father_name",
+   "fieldtype": "Data",
+   "label": "Bridegroom Father Name"
+  },
+  {
+   "fieldname": "bridegroom_mother_name",
+   "fieldtype": "Data",
+   "label": "Bridegroom Mother Name"
+  },
+  {
+   "fieldname": "is_bridegroom_course_attended",
+   "fieldtype": "Data",
+   "label": "Is Bridegroom Course Attended"
+  },
+  {
+   "fieldname": "bride_parish_id",
+   "fieldtype": "Data",
+   "label": "Bride Parish Id"
+  },
+  {
+   "fieldname": "bride_name",
+   "fieldtype": "Data",
+   "label": "Bride Name"
+  },
+  {
+   "fieldname": "bride_middle_name",
+   "fieldtype": "Data",
+   "label": "Bride Middle Name"
+  },
+  {
+   "fieldname": "bride_last_name",
+   "fieldtype": "Data",
+   "label": "Bride Last Name"
+  },
+  {
+   "fieldname": "is_dob_or_age_bride",
+   "fieldtype": "Data",
+   "label": "Is Dob Or Age Bride"
+  },
+  {
+   "fieldname": "bride_dob",
+   "fieldtype": "Date",
+   "label": "Bride Dob"
+  },
+  {
+   "fieldname": "bride_mrg_age",
+   "fieldtype": "Int",
+   "label": "Bride Mrg Age"
+  },
+  {
+   "fieldname": "bride_status",
+   "fieldtype": "Data",
+   "label": "Bride Status"
+  },
+  {
+   "fieldname": "bride_religion_id",
+   "fieldtype": "Data",
+   "label": "Bride Religion Id"
+  },
+  {
+   "fieldname": "bride_bapt_date",
+   "fieldtype": "Date",
+   "label": "Bride Bapt Date"
+  },
+  {
+   "fieldname": "bride_bapt_church",
+   "fieldtype": "Data",
+   "label": "Bride Bapt Church"
+  },
+  {
+   "fieldname": "bride_fhc_date",
+   "fieldtype": "Date",
+   "label": "Bride Fhc Date"
+  },
+  {
+   "fieldname": "bride_fhc_church",
+   "fieldtype": "Data",
+   "label": "Bride Fhc Church"
+  },
+  {
+   "fieldname": "bride_domicile",
+   "fieldtype": "Data",
+   "label": "Bride Domicile"
+  },
+  {
+   "fieldname": "bride_occupation",
+   "fieldtype": "Data",
+   "label": "Bride Occupation"
+  },
+  {
+   "fieldname": "bride_taluk",
+   "fieldtype": "Data",
+   "label": "Bride Taluk"
+  },
+  {
+   "fieldname": "bride_residential_address",
+   "fieldtype": "Data",
+   "label": "Bride Residential Address"
+  },
+  {
+   "fieldname": "bride_country_id",
+   "fieldtype": "Data",
+   "label": "Bride Country Id"
+  },
+  {
+   "fieldname": "bride_father_name",
+   "fieldtype": "Data",
+   "label": "Bride Father Name"
+  },
+  {
+   "fieldname": "bride_mother_name",
+   "fieldtype": "Data",
+   "label": "Bride Mother Name"
+  },
+  {
+   "fieldname": "is_bride_course_attended",
+   "fieldtype": "Data",
+   "label": "Is Bride Course Attended"
+  },
+  {
+   "fieldname": "witness1_name",
+   "fieldtype": "Data",
+   "label": "Witness1 Name"
+  },
+  {
+   "fieldname": "witness1_surname",
+   "fieldtype": "Data",
+   "label": "Witness1 Surname"
+  },
+  {
+   "fieldname": "witness1_age",
+   "fieldtype": "Int",
+   "label": "Witness1 Age"
+  },
+  {
+   "fieldname": "witness1_profession",
+   "fieldtype": "Data",
+   "label": "Witness1 Profession"
+  },
+  {
+   "fieldname": "witness1_address",
+   "fieldtype": "Data",
+   "label": "Witness1 Address"
+  },
+  {
+   "fieldname": "witness2_name",
+   "fieldtype": "Data",
+   "label": "Witness2 Name"
+  },
+  {
+   "fieldname": "witness2_surname",
+   "fieldtype": "Data",
+   "label": "Witness2 Surname"
+  },
+  {
+   "fieldname": "witness2_age",
+   "fieldtype": "Int",
+   "label": "Witness2 Age"
+  },
+  {
+   "fieldname": "witness2_profession",
+   "fieldtype": "Data",
+   "label": "Witness2 Profession"
+  },
+  {
+   "fieldname": "witness2_address",
+   "fieldtype": "Data",
+   "label": "Witness2 Address"
+  },
+  {
+   "fieldname": "banns",
+   "fieldtype": "Data",
+   "label": "Banns"
+  },
+  {
+   "fieldname": "bann_date1",
+   "fieldtype": "Date",
+   "label": "Bann Date1"
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Data",
+   "label": "Note"
+  }
+ ],
+ "modified": "2026-08-11 11:00:00",
+ "modified_by": "Administrator",
+ "module": "Koinonia Assistant",
+ "name": "Marriage",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "custom": 0,
+ "issingle": 0,
+ "istable": 0,
+ "autoname": "Prompt"
+}

@@ -1,0 +1,257 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "creation": "2026-08-11 11:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "first_name",
+  "middle_name",
+  "last_name",
+  "active",
+  "bapt_register_ref",
+  "bapt_date",
+  "bapt_minister",
+  "parish_priest",
+  "family_card_no",
+  "bapt_place",
+  "bapt_parish_id",
+  "bapt_country_id",
+  "gender",
+  "is_dob_or_age",
+  "dob",
+  "age",
+  "birth_place",
+  "diocese_id",
+  "vicariate_id",
+  "parish_id",
+  "status",
+  "status_date",
+  "father_name",
+  "father_domicile",
+  "father_religion_id",
+  "father_occupation",
+  "mother_name",
+  "mother_domicile",
+  "mother_religion_id",
+  "mother_occupation",
+  "bapt_god_father",
+  "bapt_god_father_last_name",
+  "bapt_god_parents_place",
+  "bapt_god_mother",
+  "bapt_god_mother_last_name",
+  "bapt_god_partent_place2",
+  "note"
+ ],
+ "fields": [
+  {
+   "fieldname": "first_name",
+   "fieldtype": "Data",
+   "label": "First Name"
+  },
+  {
+   "fieldname": "middle_name",
+   "fieldtype": "Data",
+   "label": "Middle Name"
+  },
+  {
+   "fieldname": "last_name",
+   "fieldtype": "Data",
+   "label": "Last Name"
+  },
+  {
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active"
+  },
+  {
+   "fieldname": "bapt_register_ref",
+   "fieldtype": "Data",
+   "label": "Bapt Register Ref"
+  },
+  {
+   "fieldname": "bapt_date",
+   "fieldtype": "Date",
+   "label": "Bapt Date"
+  },
+  {
+   "fieldname": "bapt_minister",
+   "fieldtype": "Data",
+   "label": "Bapt Minister"
+  },
+  {
+   "fieldname": "parish_priest",
+   "fieldtype": "Data",
+   "label": "Parish Priest"
+  },
+  {
+   "fieldname": "family_card_no",
+   "fieldtype": "Data",
+   "label": "Family Card No"
+  },
+  {
+   "fieldname": "bapt_place",
+   "fieldtype": "Data",
+   "label": "Bapt Place"
+  },
+  {
+   "fieldname": "bapt_parish_id",
+   "fieldtype": "Data",
+   "label": "Bapt Parish Id"
+  },
+  {
+   "fieldname": "bapt_country_id",
+   "fieldtype": "Data",
+   "label": "Bapt Country Id"
+  },
+  {
+   "fieldname": "gender",
+   "fieldtype": "Data",
+   "label": "Gender"
+  },
+  {
+   "fieldname": "is_dob_or_age",
+   "fieldtype": "Data",
+   "label": "Is Dob Or Age"
+  },
+  {
+   "fieldname": "dob",
+   "fieldtype": "Date",
+   "label": "Dob"
+  },
+  {
+   "fieldname": "age",
+   "fieldtype": "Int",
+   "label": "Age"
+  },
+  {
+   "fieldname": "birth_place",
+   "fieldtype": "Data",
+   "label": "Birth Place"
+  },
+  {
+   "fieldname": "diocese_id",
+   "fieldtype": "Data",
+   "label": "Diocese Id"
+  },
+  {
+   "fieldname": "vicariate_id",
+   "fieldtype": "Data",
+   "label": "Vicariate Id"
+  },
+  {
+   "fieldname": "parish_id",
+   "fieldtype": "Data",
+   "label": "Parish Id"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Data",
+   "label": "Status"
+  },
+  {
+   "fieldname": "status_date",
+   "fieldtype": "Date",
+   "label": "Status Date"
+  },
+  {
+   "fieldname": "father_name",
+   "fieldtype": "Data",
+   "label": "Father Name"
+  },
+  {
+   "fieldname": "father_domicile",
+   "fieldtype": "Data",
+   "label": "Father Domicile"
+  },
+  {
+   "fieldname": "father_religion_id",
+   "fieldtype": "Data",
+   "label": "Father Religion Id"
+  },
+  {
+   "fieldname": "father_occupation",
+   "fieldtype": "Data",
+   "label": "Father Occupation"
+  },
+  {
+   "fieldname": "mother_name",
+   "fieldtype": "Data",
+   "label": "Mother Name"
+  },
+  {
+   "fieldname": "mother_domicile",
+   "fieldtype": "Data",
+   "label": "Mother Domicile"
+  },
+  {
+   "fieldname": "mother_religion_id",
+   "fieldtype": "Data",
+   "label": "Mother Religion Id"
+  },
+  {
+   "fieldname": "mother_occupation",
+   "fieldtype": "Data",
+   "label": "Mother Occupation"
+  },
+  {
+   "fieldname": "bapt_god_father",
+   "fieldtype": "Data",
+   "label": "Bapt God Father"
+  },
+  {
+   "fieldname": "bapt_god_father_last_name",
+   "fieldtype": "Data",
+   "label": "Bapt God Father Last Name"
+  },
+  {
+   "fieldname": "bapt_god_parents_place",
+   "fieldtype": "Data",
+   "label": "Bapt God Parents Place"
+  },
+  {
+   "fieldname": "bapt_god_mother",
+   "fieldtype": "Data",
+   "label": "Bapt God Mother"
+  },
+  {
+   "fieldname": "bapt_god_mother_last_name",
+   "fieldtype": "Data",
+   "label": "Bapt God Mother Last Name"
+  },
+  {
+   "fieldname": "bapt_god_partent_place2",
+   "fieldtype": "Data",
+   "label": "Bapt God Partent Place2"
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Data",
+   "label": "Note"
+  }
+ ],
+ "modified": "2026-08-11 11:00:00",
+ "modified_by": "Administrator",
+ "module": "Koinonia Assistant",
+ "name": "Baptism",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "custom": 0,
+ "issingle": 0,
+ "istable": 0,
+ "autoname": "Prompt"
+}

@@ -1,0 +1,125 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "creation": "2026-08-11 11:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "first_name",
+  "middle_name",
+  "last_name",
+  "active",
+  "offline",
+  "diocese_id",
+  "vicariate_id",
+  "parish_id",
+  "minister",
+  "gender",
+  "anointing_date",
+  "register_reference",
+  "anointing_parish_id",
+  "anointing_diocese_id",
+  "note"
+ ],
+ "fields": [
+  {
+   "fieldname": "first_name",
+   "fieldtype": "Data",
+   "label": "First Name"
+  },
+  {
+   "fieldname": "middle_name",
+   "fieldtype": "Data",
+   "label": "Middle Name"
+  },
+  {
+   "fieldname": "last_name",
+   "fieldtype": "Data",
+   "label": "Last Name"
+  },
+  {
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active"
+  },
+  {
+   "fieldname": "offline",
+   "fieldtype": "Data",
+   "label": "Offline"
+  },
+  {
+   "fieldname": "diocese_id",
+   "fieldtype": "Data",
+   "label": "Diocese Id"
+  },
+  {
+   "fieldname": "vicariate_id",
+   "fieldtype": "Data",
+   "label": "Vicariate Id"
+  },
+  {
+   "fieldname": "parish_id",
+   "fieldtype": "Data",
+   "label": "Parish Id"
+  },
+  {
+   "fieldname": "minister",
+   "fieldtype": "Data",
+   "label": "Minister"
+  },
+  {
+   "fieldname": "gender",
+   "fieldtype": "Data",
+   "label": "Gender"
+  },
+  {
+   "fieldname": "anointing_date",
+   "fieldtype": "Date",
+   "label": "Anointing Date"
+  },
+  {
+   "fieldname": "register_reference",
+   "fieldtype": "Data",
+   "label": "Register Reference"
+  },
+  {
+   "fieldname": "anointing_parish_id",
+   "fieldtype": "Data",
+   "label": "Anointing Parish Id"
+  },
+  {
+   "fieldname": "anointing_diocese_id",
+   "fieldtype": "Data",
+   "label": "Anointing Diocese Id"
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Data",
+   "label": "Note"
+  }
+ ],
+ "modified": "2026-08-11 11:00:00",
+ "modified_by": "Administrator",
+ "module": "Koinonia Assistant",
+ "name": "Anointing Of Sick",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "custom": 0,
+ "issingle": 0,
+ "istable": 0,
+ "autoname": "Prompt"
+}

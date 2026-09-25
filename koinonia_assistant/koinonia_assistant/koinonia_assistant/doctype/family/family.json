@@ -1,0 +1,233 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "creation": "2026-08-11 11:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "status",
+  "active",
+  "parish_bcc_id",
+  "zone_id",
+  "sequence",
+  "register_date",
+  "reference",
+  "lang_community_id",
+  "rite_id",
+  "active_in_parish",
+  "family_register_number",
+  "diocese_id",
+  "vicariate_id",
+  "parish_id",
+  "settlement_status",
+  "income",
+  "income_type",
+  "economic_status",
+  "is_civil_marriage",
+  "is_church_marriage",
+  "house_type_id",
+  "house_ownership",
+  "rent_amt",
+  "street",
+  "city",
+  "district_id",
+  "state_id",
+  "country_id",
+  "zip",
+  "phone",
+  "mobile",
+  "email",
+  "comment"
+ ],
+ "fields": [
+  {
+   "fieldname": "status",
+   "fieldtype": "Data",
+   "label": "Status"
+  },
+  {
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active"
+  },
+  {
+   "fieldname": "parish_bcc_id",
+   "fieldtype": "Data",
+   "label": "Parish Bcc Id"
+  },
+  {
+   "fieldname": "zone_id",
+   "fieldtype": "Data",
+   "label": "Zone Id"
+  },
+  {
+   "fieldname": "sequence",
+   "fieldtype": "Int",
+   "label": "Sequence"
+  },
+  {
+   "fieldname": "register_date",
+   "fieldtype": "Date",
+   "label": "Register Date"
+  },
+  {
+   "fieldname": "reference",
+   "fieldtype": "Data",
+   "label": "Reference"
+  },
+  {
+   "fieldname": "lang_community_id",
+   "fieldtype": "Data",
+   "label": "Lang Community Id"
+  },
+  {
+   "fieldname": "rite_id",
+   "fieldtype": "Data",
+   "label": "Rite Id"
+  },
+  {
+   "fieldname": "active_in_parish",
+   "fieldtype": "Data",
+   "label": "Active In Parish"
+  },
+  {
+   "fieldname": "family_register_number",
+   "fieldtype": "Data",
+   "label": "Family Register Number"
+  },
+  {
+   "fieldname": "diocese_id",
+   "fieldtype": "Data",
+   "label": "Diocese Id"
+  },
+  {
+   "fieldname": "vicariate_id",
+   "fieldtype": "Data",
+   "label": "Vicariate Id"
+  },
+  {
+   "fieldname": "parish_id",
+   "fieldtype": "Data",
+   "label": "Parish Id"
+  },
+  {
+   "fieldname": "settlement_status",
+   "fieldtype": "Data",
+   "label": "Settlement Status"
+  },
+  {
+   "fieldname": "income",
+   "fieldtype": "Currency",
+   "label": "Income"
+  },
+  {
+   "fieldname": "income_type",
+   "fieldtype": "Data",
+   "label": "Income Type"
+  },
+  {
+   "fieldname": "economic_status",
+   "fieldtype": "Data",
+   "label": "Economic Status"
+  },
+  {
+   "fieldname": "is_civil_marriage",
+   "fieldtype": "Data",
+   "label": "Is Civil Marriage"
+  },
+  {
+   "fieldname": "is_church_marriage",
+   "fieldtype": "Data",
+   "label": "Is Church Marriage"
+  },
+  {
+   "fieldname": "house_type_id",
+   "fieldtype": "Data",
+   "label": "House Type Id"
+  },
+  {
+   "fieldname": "house_ownership",
+   "fieldtype": "Data",
+   "label": "House Ownership"
+  },
+  {
+   "fieldname": "rent_amt",
+   "fieldtype": "Currency",
+   "label": "Rent Amt"
+  },
+  {
+   "fieldname": "street",
+   "fieldtype": "Data",
+   "label": "Street"
+  },
+  {
+   "fieldname": "city",
+   "fieldtype": "Data",
+   "label": "City"
+  },
+  {
+   "fieldname": "district_id",
+   "fieldtype": "Data",
+   "label": "District Id"
+  },
+  {
+   "fieldname": "state_id",
+   "fieldtype": "Data",
+   "label": "State Id"
+  },
+  {
+   "fieldname": "country_id",
+   "fieldtype": "Data",
+   "label": "Country Id"
+  },
+  {
+   "fieldname": "zip",
+   "fieldtype": "Data",
+   "label": "Zip"
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "Phone"
+  },
+  {
+   "fieldname": "mobile",
+   "fieldtype": "Data",
+   "label": "Mobile"
+  },
+  {
+   "fieldname": "email",
+   "fieldtype": "Data",
+   "label": "Email"
+  },
+  {
+   "fieldname": "comment",
+   "fieldtype": "Data",
+   "label": "Comment"
+  }
+ ],
+ "modified": "2026-08-11 11:00:00",
+ "modified_by": "Administrator",
+ "module": "Koinonia Assistant",
+ "name": "Family",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "custom": 0,
+ "issingle": 0,
+ "istable": 0,
+ "autoname": "Prompt"
+}

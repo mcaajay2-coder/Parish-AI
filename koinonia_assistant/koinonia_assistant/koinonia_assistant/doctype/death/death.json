@@ -1,0 +1,263 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "creation": "2026-08-11 11:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "first_name",
+  "middle_name",
+  "last_name",
+  "active",
+  "death_register_ref",
+  "death_date",
+  "death_place",
+  "death_cause",
+  "family_card_no",
+  "death_parish_id",
+  "death_country_id",
+  "caste",
+  "mobile_no",
+  "is_dob_or_age",
+  "dob",
+  "age",
+  "marital_status",
+  "spouse",
+  "residence",
+  "is_last_sacrament_received",
+  "birth_place",
+  "gender",
+  "occupation",
+  "father_name",
+  "mother_name",
+  "burial_date",
+  "burial_minister",
+  "burial_place",
+  "burial_parish",
+  "parish_priest",
+  "cemetery_code",
+  "diocese_id",
+  "vicariate_id",
+  "parish_id",
+  "last_sac_minister",
+  "relation_name",
+  "relationship_id",
+  "note"
+ ],
+ "fields": [
+  {
+   "fieldname": "first_name",
+   "fieldtype": "Data",
+   "label": "First Name"
+  },
+  {
+   "fieldname": "middle_name",
+   "fieldtype": "Data",
+   "label": "Middle Name"
+  },
+  {
+   "fieldname": "last_name",
+   "fieldtype": "Data",
+   "label": "Last Name"
+  },
+  {
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active"
+  },
+  {
+   "fieldname": "death_register_ref",
+   "fieldtype": "Data",
+   "label": "Death Register Ref"
+  },
+  {
+   "fieldname": "death_date",
+   "fieldtype": "Date",
+   "label": "Death Date"
+  },
+  {
+   "fieldname": "death_place",
+   "fieldtype": "Data",
+   "label": "Death Place"
+  },
+  {
+   "fieldname": "death_cause",
+   "fieldtype": "Data",
+   "label": "Death Cause"
+  },
+  {
+   "fieldname": "family_card_no",
+   "fieldtype": "Data",
+   "label": "Family Card No"
+  },
+  {
+   "fieldname": "death_parish_id",
+   "fieldtype": "Data",
+   "label": "Death Parish Id"
+  },
+  {
+   "fieldname": "death_country_id",
+   "fieldtype": "Data",
+   "label": "Death Country Id"
+  },
+  {
+   "fieldname": "caste",
+   "fieldtype": "Data",
+   "label": "Caste"
+  },
+  {
+   "fieldname": "mobile_no",
+   "fieldtype": "Data",
+   "label": "Mobile No"
+  },
+  {
+   "fieldname": "is_dob_or_age",
+   "fieldtype": "Data",
+   "label": "Is Dob Or Age"
+  },
+  {
+   "fieldname": "dob",
+   "fieldtype": "Date",
+   "label": "Dob"
+  },
+  {
+   "fieldname": "age",
+   "fieldtype": "Int",
+   "label": "Age"
+  },
+  {
+   "fieldname": "marital_status",
+   "fieldtype": "Data",
+   "label": "Marital Status"
+  },
+  {
+   "fieldname": "spouse",
+   "fieldtype": "Data",
+   "label": "Spouse"
+  },
+  {
+   "fieldname": "residence",
+   "fieldtype": "Data",
+   "label": "Residence"
+  },
+  {
+   "fieldname": "is_last_sacrament_received",
+   "fieldtype": "Data",
+   "label": "Is Last Sacrament Received"
+  },
+  {
+   "fieldname": "birth_place",
+   "fieldtype": "Data",
+   "label": "Birth Place"
+  },
+  {
+   "fieldname": "gender",
+   "fieldtype": "Data",
+   "label": "Gender"
+  },
+  {
+   "fieldname": "occupation",
+   "fieldtype": "Data",
+   "label": "Occupation"
+  },
+  {
+   "fieldname": "father_name",
+   "fieldtype": "Data",
+   "label": "Father Name"
+  },
+  {
+   "fieldname": "mother_name",
+   "fieldtype": "Data",
+   "label": "Mother Name"
+  },
+  {
+   "fieldname": "burial_date",
+   "fieldtype": "Date",
+   "label": "Burial Date"
+  },
+  {
+   "fieldname": "burial_minister",
+   "fieldtype": "Data",
+   "label": "Burial Minister"
+  },
+  {
+   "fieldname": "burial_place",
+   "fieldtype": "Data",
+   "label": "Burial Place"
+  },
+  {
+   "fieldname": "burial_parish",
+   "fieldtype": "Data",
+   "label": "Burial Parish"
+  },
+  {
+   "fieldname": "parish_priest",
+   "fieldtype": "Data",
+   "label": "Parish Priest"
+  },
+  {
+   "fieldname": "cemetery_code",
+   "fieldtype": "Data",
+   "label": "Cemetery Code"
+  },
+  {
+   "fieldname": "diocese_id",
+   "fieldtype": "Data",
+   "label": "Diocese Id"
+  },
+  {
+   "fieldname": "vicariate_id",
+   "fieldtype": "Data",
+   "label": "Vicariate Id"
+  },
+  {
+   "fieldname": "parish_id",
+   "fieldtype": "Data",
+   "label": "Parish Id"
+  },
+  {
+   "fieldname": "last_sac_minister",
+   "fieldtype": "Data",
+   "label": "Last Sac Minister"
+  },
+  {
+   "fieldname": "relation_name",
+   "fieldtype": "Data",
+   "label": "Relation Name"
+  },
+  {
+   "fieldname": "relationship_id",
+   "fieldtype": "Data",
+   "label": "Relationship Id"
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Data",
+   "label": "Note"
+  }
+ ],
+ "modified": "2026-08-11 11:00:00",
+ "modified_by": "Administrator",
+ "module": "Koinonia Assistant",
+ "name": "Death",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "custom": 0,
+ "issingle": 0,
+ "istable": 0,
+ "autoname": "Prompt"
+}

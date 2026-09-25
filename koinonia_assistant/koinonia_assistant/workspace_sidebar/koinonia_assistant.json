@@ -1,0 +1,29 @@
+{
+ "app": "koinonia_assistant",
+ "creation": "2026-08-11 12:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Workspace Sidebar",
+ "header_icon": "church",
+ "idx": 0,
+ "items": [
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "message-square",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Open Assistant",
+   "link_type": "Page",
+   "show_arrow": 0,
+   "type": "Link",
+   "link_to": "koinonia-chat"
+  }
+ ],
+ "modified": "2026-08-11 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Koinonia Assistant",
+ "name": "koinonia_assistant",
+ "owner": "Administrator",
+ "standard": 1,
+ "title": "Koinonia Assistant"
+}

@@ -1,0 +1,47 @@
+{
+ "doctype": "DocType",
+ "name": "Parish",
+ "module": "Koinonia",
+ "custom": 0,
+ "autoname": "field:parish_name",
+ "naming_rule": "By fieldname",
+ "title_field": "parish_name",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1,
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "parish_name", "fieldtype": "Data", "label": "Parish Name", "reqd": 1, "unique": 1, "in_list_view": 1},
+  {"fieldname": "parish_code", "fieldtype": "Data", "label": "Parish Code", "unique": 1, "in_list_view": 1},
+  {"fieldname": "diocese_id", "fieldtype": "Link", "label": "Diocese", "options": "Diocese", "reqd": 1, "in_list_view": 1, "in_standard_filter": 1},
+  {"fieldname": "vicariate_id", "fieldtype": "Link", "label": "Vicariate", "options": "Vicariate", "reqd": 1, "in_list_view": 1, "in_standard_filter": 1},
+  {"fieldname": "column_break_1", "fieldtype": "Column Break"},
+  {"fieldname": "parish_priest", "fieldtype": "Data", "label": "Parish Priest"},
+  {"fieldname": "assistant_priest", "fieldtype": "Data", "label": "Assistant Priest(s)"},
+  {"fieldname": "patron_saint", "fieldtype": "Data", "label": "Patron Saint"},
+  {"fieldname": "feast_day", "fieldtype": "Date", "label": "Feast Day"},
+  {"fieldname": "established_date", "fieldtype": "Date", "label": "Date Established"},
+  {"fieldname": "active", "fieldtype": "Check", "label": "Active", "default": "1", "in_list_view": 1},
+  {"fieldname": "section_break_address", "fieldtype": "Section Break", "label": "Address"},
+  {"fieldname": "street", "fieldtype": "Data", "label": "Address Line 1"},
+  {"fieldname": "street2", "fieldtype": "Data", "label": "Address Line 2"},
+  {"fieldname": "city", "fieldtype": "Data", "label": "City"},
+  {"fieldname": "district_id", "fieldtype": "Link", "label": "District", "options": "District"},
+  {"fieldname": "column_break_2", "fieldtype": "Column Break"},
+  {"fieldname": "state_id", "fieldtype": "Link", "label": "State", "options": "State"},
+  {"fieldname": "country_id", "fieldtype": "Link", "label": "Country", "options": "Country"},
+  {"fieldname": "zip", "fieldtype": "Data", "label": "PIN Code"},
+  {"fieldname": "phone", "fieldtype": "Data", "label": "Phone"},
+  {"fieldname": "email", "fieldtype": "Data", "label": "Email", "options": "Email"},
+  {"fieldname": "section_break_sub", "fieldtype": "Section Break", "label": "Sub Stations"},
+  {"fieldname": "sub_station_ids", "fieldtype": "Table", "label": "Sub Stations", "options": "Sub Station"},
+  {"fieldname": "section_break_note", "fieldtype": "Section Break", "label": "Note"},
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "Note"}
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1, "write": 1, "create": 1, "delete": 1, "report": 1, "export": 1, "print": 1, "email": 1, "share": 1
+  }
+ ]
+}
