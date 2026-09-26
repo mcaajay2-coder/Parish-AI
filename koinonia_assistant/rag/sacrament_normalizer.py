@@ -43,9 +43,9 @@ SACRAMENT_MAPPINGS = {
     },
     "Baptism": {
         "canonical_en": "Baptism",
-        "canonical_ta": "ஞானஸ்நானம்",
-        "canonical_ta_short": "திருமுழுக்கு",
-        "canonical_tanglish": "Gnanasnanam",
+        "canonical_ta": "திருமுழுக்கு",
+        "canonical_ta_short": "ஞானஸ்நானம்",
+        "canonical_tanglish": "Thirumuzhukku",
         "field_name": "bapt_date",
         "table_name": "tabMember",
         "aliases": [
@@ -55,8 +55,9 @@ SACRAMENT_MAPPINGS = {
             "gnanasnaanam", "nanasnaanam",
             "thirumulukku", "thirumuzhukku", "thirumuluku", "thirumuzhuku", "thirumulku",
             "ஞானஸ்நானம்", "ஞானஸ்னானம்", "ஞானஸ்நான", "ஞான ஸ்நானம்", "ஞான ஸ்னானம்",
-            "ஞானஸ்தானம்", "ஞான ஸ்தானம்",
-            "திருமுழுக்கு", "திருமுழுகு", "திரு முழுக்கு", "ஞானஸ்நானப் பதிவு"
+            "ஞானஸ்தானம்", "ஞான ஸ்தானம்", "ஞானஸ்நானப் பதிவு",
+            "திருமுழுக்கு", "திருமுழுகு", "திரு முழுக்கு", "திருமுழுக்குகள்", "திருமுழுக்கின்",
+            "திருமுழுக்கு பெற்ற", "திருமுழுக்குப் பதிவு", "திருமுழுக்கு நிகழ்வு"
         ]
     },
     "Confirmation": {

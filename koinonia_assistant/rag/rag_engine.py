@@ -17,7 +17,6 @@ from koinonia_assistant.rag.name_search import (
     determine_response_scope,
     render_scoped_response,
     build_candidate_prompt,
-    normalize_name,
     RESERVED_GENERIC_WORDS,
 )
 import datetime
@@ -837,24 +836,24 @@ def decide_permission(state: GraphState):
 
 def router_node(state: GraphState) -> GraphState:
     req_id = state.get("request_id", "N/A")
-    q_exec = (state.get("corrected_query") or state.get("question") or state.get("original_query")).strip()
-    q = q_exec.lower()
+    q_raw = (state.get("question") or state.get("original_query") or "").strip()
+    q = q_raw.lower()
 
     from koinonia_assistant.rag.analytics_engine import classify_langgraph_intent
-    intent_info = state.get("intent_info") or classify_langgraph_intent(q_exec)
+    intent_info = classify_langgraph_intent(q_raw)
     c_intent = intent_info.get("intent", "GENERAL_DATABASE_QUERY")
     s_tier = intent_info.get("speed_tier", "FAST")
     lang = intent_info.get("detected_language") or state.get("detected_language", "en")
 
     print(
         f"[LANGGRAPH] ROUTER NODE | request_id={req_id} | language={lang} "
-        f"| intent={c_intent} | speed_tier={s_tier} | query='{q_exec}'"
+        f"| intent={c_intent} | speed_tier={s_tier} | original_query='{q_raw}'"
     )
 
     common_state = {
         **state,
-        "question": q_exec,
-        "original_query": state.get("original_query") or q_exec,
+        "question": q_raw,
+        "original_query": state.get("original_query") or q_raw,
         "detected_language": lang,
         "normalized_query": intent_info.get("normalized_query", ""),
         "intent_query": intent_info.get("intent_query", c_intent),
@@ -1392,7 +1391,7 @@ ORDER BY `Year` ASC;"""
         p_filter = f"AND (parish_id LIKE '%{parish}%')" if parish else ""
         if year_match:
             tgt_yr = year_match.group(1)
-            diag_sql = f"""SELECT 'Baptism (ஞானஸ்நானம்)' AS `Sacrament`, COUNT(*) AS `Total Count` FROM `tabMember` WHERE bapt_date IS NOT NULL AND YEAR(bapt_date) = {tgt_yr} {p_filter}
+            diag_sql = f"""SELECT 'Baptism (திருமுழுக்கு)' AS `Sacrament`, COUNT(*) AS `Total Count` FROM `tabMember` WHERE bapt_date IS NOT NULL AND YEAR(bapt_date) = {tgt_yr} {p_filter}
 UNION ALL
 SELECT 'First Communion (முதல் நற்கருணை)', COUNT(*) FROM `tabMember` WHERE fhc_date IS NOT NULL AND YEAR(fhc_date) = {tgt_yr} {p_filter}
 UNION ALL
@@ -1401,7 +1400,7 @@ UNION ALL
 SELECT 'Marriage (திருமணம்)', COUNT(*) FROM `tabMember` WHERE mrg_date IS NOT NULL AND YEAR(mrg_date) = {tgt_yr} {p_filter};"""
             expl = f"Aggregating all sacraments breakdown and total count for year {tgt_yr}"
         else:
-            diag_sql = f"""SELECT 'Baptism (ஞானஸ்நானம்)' AS `Sacrament`, COUNT(*) AS `Total Count` FROM `tabMember` WHERE bapt_date IS NOT NULL {p_filter}
+            diag_sql = f"""SELECT 'Baptism (திருமுழுக்கு)' AS `Sacrament`, COUNT(*) AS `Total Count` FROM `tabMember` WHERE bapt_date IS NOT NULL {p_filter}
 UNION ALL
 SELECT 'First Communion (முதல் நற்கருணை)', COUNT(*) FROM `tabMember` WHERE fhc_date IS NOT NULL {p_filter}
 UNION ALL
@@ -1896,7 +1895,7 @@ def database_lookup_node(state: GraphState) -> GraphState:
     - MEMBER_SEARCH / FAMILY_SEARCH / SACRAMENT_SEARCH (including Family Card & Tamil names)
     """
     req_id = state.get("request_id", "N/A")
-    question = state.get("corrected_query") or state.get("question") or state.get("original_query")
+    question = (state.get("question") or state.get("original_query") or "").strip()
     c_intent = state.get("classified_intent", "LIST")
     intent_info = state.get("intent_info") or {}
     auth_ctx = state.get("authorization_context") or {}
@@ -1906,14 +1905,13 @@ def database_lookup_node(state: GraphState) -> GraphState:
     user_parish = (scope_name if scope_type == "PARISH" else None) or state.get("user_parish")
     user_diocese = auth_ctx.get("diocese_id") or state.get("user_diocese")
     is_ta = state.get("detected_language") == "ta"
-    resp_lang = "ta" if is_ta else "en"
 
-    print(f"[LANGGRAPH] DATABASE NODE | request_id={req_id} | intent={c_intent} | scope_type={scope_type} | scope_name={scope_name} | lang={resp_lang}")
+    print(f"[LANGGRAPH] DATABASE NODE | request_id={req_id} | intent={c_intent} | scope_type={scope_type} | scope_name={scope_name}")
 
     # 1. Qualified Member Sacrament List (e.g. "List any 10 members who got 3 Sacrements")
     if c_intent == "LIST" and intent_info.get("sub_intent") == "QUALIFIED_MEMBER_SACRAMENT_LIST":
         ensure_frappe_connected()
-        from koinonia_assistant.rag.analytics_engine import execute_qualified_member_sacrament_list, generate_dynamic_suggested_questions
+        from koinonia_assistant.rag.analytics_engine import execute_qualified_member_sacrament_list
         res = execute_qualified_member_sacrament_list(
             sacrament_count_filter=intent_info.get("sacrament_count_filter"),
             metrics=intent_info.get("metrics") or [],
@@ -1930,7 +1928,11 @@ def database_lookup_node(state: GraphState) -> GraphState:
             "sql_result": res["data"],
             "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
             "authorized_record_count": res["records_retrieved"],
-            "suggested_questions": generate_dynamic_suggested_questions(intent_info, resp_lang, auth_ctx),
+            "suggested_questions": [
+                "List any 10 members who got 2 Sacraments",
+                f"Show baptism statistics for the last 10 years in {scope_name}",
+                "Compare baptism, confirmation and marriage over the last 10 years",
+            ],
         }
 
     # 2. Standard LIST_MEMBERS / LIST_FAMILIES
@@ -1959,62 +1961,36 @@ def database_lookup_node(state: GraphState) -> GraphState:
         metrics = intent_info.get("metrics") or []
         if sub == "COUNT_MEMBERS" and not metrics:
             res = handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
-            reply_txt = res["reply"]
-            sugg_qs = res.get("suggested_questions", [])
-            if is_ta:
-                cnt_m = res.get("data", [{}])[0].get("Total Members", 0) if res.get("data") else 0
-                reply_txt = (
-                    f"### 📊 {scope_name} — பங்கு உறுப்பினர்கள் எண்ணிக்கை\n"
-                    f"- **அனுமதிக்கப்பட்ட பங்கு ({scope_name}):** மொத்தம் **`{cnt_m:,}`** உறுப்பினர்கள் உள்ளனர்."
-                )
-                sugg_qs = [
-                    f"{scope_name}-ல் மொத்தம் எத்தனை குடும்பங்கள் உள்ளன?",
-                    "கடந்த 10 ஆண்டுகளின் ஞானஸ்நான எண்ணிக்கையை காட்டவும்",
-                    "கடந்த 10 ஆண்டுகளின் திருமண எண்ணிக்கையை காட்டவும்",
-                ]
             return {
                 **state,
                 "route": "handled",
-                "deterministic_reply": reply_txt,
+                "deterministic_reply": res["reply"],
                 "generated_sql": res.get("generated_sql", ""),
                 "sql_result": res.get("data", []),
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                 "authorized_record_count": 1,
-                "suggested_questions": sugg_qs,
+                "suggested_questions": res.get("suggested_questions", []),
             }
         elif sub == "COUNT_FAMILIES" and not metrics:
             res = handle_count_families(user_parish=user_parish, user_diocese=user_diocese)
-            reply_txt = res["reply"]
-            sugg_qs = res.get("suggested_questions", [])
+            reply = res["reply"]
             if is_ta:
-                cnt_f = res.get("data", [{}])[0].get("Total Families", 0) if res.get("data") else 0
-                reply_txt = (
-                    f"### 📊 {scope_name} — குடும்பங்கள் எண்ணிக்கை\n"
-                    f"- **அனுமதிக்கப்பட்ட பங்கு ({scope_name}):** மொத்தம் **`{cnt_f:,}`** குடும்பங்கள் உள்ளன."
-                )
-                sugg_qs = [
-                    f"{scope_name}-ல் மொத்தம் எத்தனை உறுப்பினர்கள் உள்ளனர்?",
-                    "கடந்த 10 ஆண்டுகளின் ஞானஸ்நான எண்ணிக்கையை காட்டவும்",
-                    "கடந்த 10 ஆண்டுகளின் திருமண எண்ணிக்கையை காட்டவும்",
-                ]
+                cnt_f = (res.get("data") or [{}])[0].get("total_families", 0)
+                reply = f"**{scope_name}** பங்கில் மொத்தம் **{cnt_f}** குடும்பங்கள் பதிவு செய்யப்பட்டுள்ளன."
             return {
                 **state,
                 "route": "handled",
-                "deterministic_reply": reply_txt,
+                "deterministic_reply": reply,
                 "generated_sql": res.get("generated_sql", ""),
                 "sql_result": res.get("data", []),
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                 "authorized_record_count": 1,
-                "suggested_questions": sugg_qs,
+                "suggested_questions": res.get("suggested_questions", []),
             }
         elif metrics:
             ensure_frappe_connected()
             import frappe
-            from koinonia_assistant.rag.analytics_engine import (
-                SACRAMENT_METRICS,
-                authorization_sql_validator,
-                generate_dynamic_suggested_questions,
-            )
+            from koinonia_assistant.rag.analytics_engine import SACRAMENT_METRICS, authorization_sql_validator
             m_key = metrics[0]
             meta = SACRAMENT_METRICS[m_key]
             tbl = meta["table"]
@@ -2022,7 +1998,7 @@ def database_lookup_node(state: GraphState) -> GraphState:
             p_cols = meta["parish_cols"]
 
             yr_match = re.search(r"\b(19\d\d|20\d\d)\b", question)
-            target_yr = intent_info.get("target_year") or (int(yr_match.group(1)) if yr_match else None)
+            target_yr = int(yr_match.group(1)) if yr_match else None
 
             where_c = ["1=1"]
             params = []
@@ -2044,16 +2020,10 @@ def database_lookup_node(state: GraphState) -> GraphState:
             cnt_val = int(frappe.db.sql(sql_exec, tuple(params))[0][0])
             yr_str = f" in **{target_yr}**" if target_yr else ""
             if is_ta:
-                if target_yr:
-                    reply = (
-                        f"### 📊 {scope_name} — {meta['ta_label']} எண்ணிக்கை ({target_yr})\n"
-                        f"- **அனுமதிக்கப்பட்ட பங்கு ({scope_name}):** **{target_yr}** ஆம் ஆண்டில் மொத்தம் **`{cnt_val:,}`** {meta['ta_label']} பதிவுகள் உள்ளன."
-                    )
-                else:
-                    reply = (
-                        f"### 📊 {scope_name} — {meta['ta_label']} எண்ணிக்கை\n"
-                        f"- **அனுமதிக்கப்பட்ட பங்கு ({scope_name}):** மொத்தம் **`{cnt_val:,}`** {meta['ta_label']} பதிவுகள் உள்ளன."
-                    )
+                reply = (
+                    f"### 📊 {scope_name} — {meta['ta_label']} எண்ணிக்கை\n"
+                    f"- **அனுமதிக்கப்பட்ட பங்கு ({scope_name}):** மொத்தம் **`{cnt_val:,}`** {meta['ta_label']} பதிவுகள் உள்ளன."
+                )
             else:
                 reply = (
                     f"### 📊 {scope_name} — Verified {meta['label']} Record Count{yr_str}\n"
@@ -2070,7 +2040,11 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 "sql_result": data_rows,
                 "sql_validation_result": val_res["reason"],
                 "authorized_record_count": cnt_val,
-                "suggested_questions": generate_dynamic_suggested_questions(intent_info, resp_lang, auth_ctx),
+                "suggested_questions": [
+                    f"What was the number of {meta['label'].lower()}s each year for the last 10 years?",
+                    f"How has {meta['label'].lower()} changed over the last 10 years?",
+                    f"Forecast {meta['label'].lower()} for the next 10 years",
+                ],
             }
 
     # 4. Family Card Lookup (Sections 64 & 67: Verify card belongs to authorized parish BEFORE retrieving members)
@@ -2108,50 +2082,17 @@ def database_lookup_node(state: GraphState) -> GraphState:
         fid = fam_rows[0]["name"]
         bundle = fetch_full_family_bundle(fid, user_parish)
         if bundle.get("family"):
-            scope = intent_info.get("scope") or determine_response_scope(question)
-            members_list = bundle.get("members", [])
-            q_person = intent_info.get("person_name") or classify_query_intent(question).get("person_name")
-            target_mem = None
-            if q_person and members_list:
-                norm_qp = normalize_name(q_person)
-                target_mem = next(
-                    (m for m in members_list if normalize_name(m.get("full_name", "")) == norm_qp),
-                    None
-                )
-                if not target_mem:
-                    target_mem = next(
-                        (m for m in members_list if norm_qp in normalize_name(m.get("full_name", "")) or normalize_name(m.get("full_name", "")) in norm_qp),
-                        None
-                    )
-            if not target_mem and members_list:
-                target_mem = next(
-                    (m for m in members_list if str(m.get("is_family_head")) in ["1", "True", "true"] or m.get("relationship_id") in ["Head of Family", "Husband"]),
-                    members_list[0]
-                )
-            target_mem = target_mem or {}
-            sac_bundle = fetch_member_sacrament_bundle(target_mem.get("member_id"), user_parish) if target_mem.get("member_id") else None
-            reply, suggestions = render_scoped_response(scope, target_mem, sac_bundle, bundle, language=resp_lang)
-            if scope in (
-                "FAMILY_BAPTISM_RECORDS",
-                "FAMILY_COMMUNION_RECORDS",
-                "FAMILY_CONFIRMATION_RECORDS",
-                "FAMILY_MARRIAGE_RECORDS",
-                "FAMILY_DEATH_RECORDS",
-                "FAMILY_ALL_SACRAMENTS",
-            ):
-                data_payload = bundle.get("family_sacrament_rows") or members_list
-            elif scope == "FAMILY_MEMBER_COUNT":
-                data_payload = [{"Family Head": target_mem.get("full_name", "N/A"), "Family Card": card_code, "Family Member Count": len(members_list)}]
-            else:
-                data_payload = members_list if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS'] else ([target_mem] if target_mem else [])
+            scope = determine_response_scope(question)
+            head_mem = bundle.get("members", [{}])[0] if bundle.get("members") else {}
+            reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
             return {
                 **state,
                 "route": "handled",
                 "deterministic_reply": reply,
                 "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}' AND parish_id = '{user_parish or ''}'",
-                "sql_result": data_payload,
+                "sql_result": bundle.get("members", []),
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(data_payload),
+                "authorized_record_count": len(bundle.get("members", [])),
                 "suggested_questions": suggestions,
             }
 
@@ -2170,19 +2111,9 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 m["full_name"] = sac_bundle.get("full_name") or f"{m.get('first_name', '')} {m.get('last_name', '')}".strip()
                 fam_bundle = fetch_full_family_bundle(m.get("family_id"), user_parish)
                 m["family_register_number"] = fam_bundle.get("family", {}).get("family_register_number") or m.get("family_id")
-                scope = intent_info.get("scope") or determine_response_scope(question)
-                reply, suggestions = render_scoped_response(scope, m, sac_bundle, fam_bundle, language=resp_lang)
-                if scope in (
-                    "FAMILY_BAPTISM_RECORDS",
-                    "FAMILY_COMMUNION_RECORDS",
-                    "FAMILY_CONFIRMATION_RECORDS",
-                    "FAMILY_MARRIAGE_RECORDS",
-                    "FAMILY_DEATH_RECORDS",
-                    "FAMILY_ALL_SACRAMENTS",
-                ):
-                    data_payload = fam_bundle.get("family_sacrament_rows") or fam_bundle.get("members", [])
-                else:
-                    data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS'] else [m]
+                scope = determine_response_scope(question)
+                reply, suggestions = render_scoped_response(scope, m, sac_bundle, fam_bundle, language="ta" if is_ta else "en")
+                data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS'] else [m]
                 return {
                     **state,
                     "route": "handled",
@@ -2197,36 +2128,23 @@ def database_lookup_node(state: GraphState) -> GraphState:
             fid = fam_id_match.group(1)
             bundle = fetch_full_family_bundle(fid, user_parish)
             if bundle.get("family"):
-                scope = intent_info.get("scope") or determine_response_scope(question)
-                members_list = bundle.get("members", [])
-                head_mem = next(
-                    (m for m in members_list if str(m.get("is_family_head")) in ["1", "True", "true"] or m.get("relationship_id") in ["Head of Family", "Husband"]),
-                    members_list[0] if members_list else {}
-                )
-                reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language=resp_lang)
-                data_payload = bundle.get("family_sacrament_rows") if scope in (
-                    "FAMILY_BAPTISM_RECORDS",
-                    "FAMILY_COMMUNION_RECORDS",
-                    "FAMILY_CONFIRMATION_RECORDS",
-                    "FAMILY_MARRIAGE_RECORDS",
-                    "FAMILY_DEATH_RECORDS",
-                    "FAMILY_ALL_SACRAMENTS",
-                ) else members_list
+                scope = determine_response_scope(question)
+                head_mem = bundle.get("members", [{}])[0] if bundle.get("members") else {}
+                reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
                 return {
                     **state,
                     "route": "handled",
                     "deterministic_reply": reply,
                     "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}'",
-                    "sql_result": data_payload,
+                    "sql_result": bundle.get("members", []),
                     "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                    "authorized_record_count": len(data_payload),
+                    "authorized_record_count": len(bundle.get("members", [])),
                     "suggested_questions": suggestions,
                 }
 
-    # 3-Level Member / Family / Sacrament Resolution (Supports English, Tamil, Tanglish & Mixed queries natively)
+    # 3-Level Member / Family / Sacrament Resolution (Supports both English & Tamil names via person_name entity)
     person_name = intent_info.get("person_name") or extract_person_name_from_query(question)
     if person_name:
-        # Resolve member and family using the original/corrected query without forcing BAPTISM_STATUS
         person_res = resolve_member_and_family(
             question,
             user_parish=user_parish,
@@ -2237,78 +2155,49 @@ def database_lookup_node(state: GraphState) -> GraphState:
             sac_bundle = person_res.get("sacrament_bundle")
             fam_bundle = person_res.get("family_bundle")
             scope = intent_info.get("scope") or person_res.get("response_scope") or determine_response_scope(question)
-            reply, suggestions = render_scoped_response(scope, m, sac_bundle, fam_bundle, language=resp_lang)
-            if scope in (
-                "FAMILY_BAPTISM_RECORDS",
-                "FAMILY_COMMUNION_RECORDS",
-                "FAMILY_CONFIRMATION_RECORDS",
-                "FAMILY_MARRIAGE_RECORDS",
-                "FAMILY_DEATH_RECORDS",
-                "FAMILY_ALL_SACRAMENTS",
-            ):
-                data_payload = (fam_bundle or {}).get("family_sacrament_rows") or (fam_bundle or {}).get("members", [])
-                gen_sql_str = (
-                    f"SELECT m.name, m.first_name, m.last_name, m.bapt_date, m.fhc_date, m.cnf_date, m.mrg_date "
-                    f"FROM `tabMember` m WHERE m.family_id = '{m.get('family_id')}' AND m.parish_id = '{user_parish or ''}'"
-                )
-            elif scope == "FAMILY_MEMBER_COUNT":
-                card_no = m.get("family_register_number") or (fam_bundle or {}).get("family", {}).get("family_register_number") or m.get("family_id") or "N/A"
-                fam_members = (fam_bundle or {}).get("members", [])
-                data_payload = [{"Family Head": m.get("full_name", "N/A"), "Family Card": card_no, "Family Member Count": len(fam_members)}]
-                gen_sql_str = f"SELECT COUNT(*) AS family_member_count FROM `tabMember` WHERE family_id = '{m.get('family_id')}' AND parish_id = '{user_parish or ''}'"
-            elif scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS']:
-                data_payload = (fam_bundle or {}).get("members", [])
-                gen_sql_str = f"SELECT * FROM `tabMember` WHERE family_id = '{m.get('family_id')}' AND parish_id = '{user_parish or ''}'"
-            else:
-                data_payload = [m]
-                gen_sql_str = f"SELECT * FROM `tabMember` WHERE name = '{m.get('member_id')}' AND parish_id = '{user_parish or ''}'"
+            reply, suggestions = render_scoped_response(scope, m, sac_bundle, fam_bundle, language="ta" if is_ta else "en")
+            data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS', 'FAMILY_ALL_SACRAMENTS', 'FAMILY_BAPTISM_RECORDS', 'FAMILY_COMMUNION_RECORDS', 'FAMILY_CONFIRMATION_RECORDS', 'FAMILY_MARRIAGE_RECORDS', 'FAMILY_DEATH_RECORDS'] else [m]
             return {
                 **state,
                 "route": "handled",
                 "deterministic_reply": reply,
-                "generated_sql": gen_sql_str,
+                "generated_sql": f"SELECT * FROM `tabMember` WHERE name = '{m.get('member_id')}' AND parish_id = '{user_parish or ''}'",
                 "sql_result": data_payload,
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                 "authorized_record_count": len(data_payload),
                 "suggested_questions": suggestions,
             }
         elif person_res.get("status") == "candidates":
-            cands = person_res.get("candidates", [])[:1]
-            top_cand_name = cands[0].get("full_name", "this parishioner") if cands else "this parishioner"
+            cands = person_res.get("candidates", [])
             disambig_obj = {
                 "message": (
-                    f"நீங்கள் '{top_cand_name}' என்பவரைக் குறிப்பிடுகிறீர்களா?"
+                    "பின்வரும் பங்கு உறுப்பினர்களில் யாரைக் குறிப்பிடுகிறீர்கள்?"
                     if is_ta
-                    else f"Did you mean {top_cand_name}?"
+                    else "Did you mean one of the following parishioners?"
                 ),
-                "options": cands[:1]
+                "options": cands[:3]
             }
             return {
                 **state,
                 "route": "handled",
                 "deterministic_reply": (
-                    f"நீங்கள் **{top_cand_name}** என்பவரைக் குறிப்பிடுகிறீர்களா? விவரங்களைப் பார்க்க கீழே தேர்ந்தெடுக்கவும்:"
+                    "பல பொருத்தமான பதிவுகள் கண்டறியப்பட்டுள்ளன. விவரங்களைப் பார்க்க கீழே உள்ளவற்றில் ஒன்றைத் தேர்ந்தெடுக்கவும்:"
                     if is_ta
-                    else f"Did you mean **{top_cand_name}**? Please select to view details:"
+                    else "Multiple matching records found. Please select an option to view details:"
                 ),
                 "generated_sql": "",
                 "sql_result": [],
                 "disambiguation": disambig_obj,
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(cands[:1]),
-                "suggested_questions": [],
+                "authorized_record_count": len(cands[:3]),
+                "suggested_questions": [c.get("prompt") for c in cands[:3]],
             }
         elif person_res.get("status") == "not_found":
             parish_label = f" in {user_parish}" if user_parish else ""
-            not_found_msg = (
-                f"உங்கள் அனுமதிக்கப்பட்ட பங்கு எல்லையில் (**{scope_name}**) `{person_name}` என்ற பெயரில் உறுப்பினர் அல்லது குடும்பப் பதிவுகள் எதுவும் கண்டறியப்படவில்லை."
-                if is_ta
-                else f"No parishioner or family records found matching '{person_name}'{parish_label}. Please verify the spelling or check with the parish office."
-            )
             return {
                 **state,
                 "route": "handled",
-                "deterministic_reply": not_found_msg,
+                "deterministic_reply": f"No parishioner or family records found matching '{person_name}'{parish_label}. Please verify the spelling or check with the parish office.",
                 "generated_sql": "",
                 "sql_result": [],
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
@@ -2548,6 +2437,93 @@ def generate_follow_up_suggestions(question: str, sql_result: Any):
     return suggestions[:4]
 
 
+def resolve_follow_up_context(question: str, history: list = None) -> tuple[str, dict]:
+    """
+    FOLLOW-UP CONTEXT RULE:
+    If the previous assistant/user turn identified a specific family, member, parish,
+    or family card, short follow-up queries (in English, Tamil, Tanglish) must inherit
+    the entity from the previous turn.
+    """
+    if not history or not question:
+        return question, {}
+
+    q_clean = question.strip()
+    is_anaphoric = False
+    anaphoric_patterns = [
+        r"^(?:அவர்களை|அவர்களின்|அவர்களுடைய|அவர்|அவரை|அவரின்|இவர்|இவர்களை|இவர்களின்)\b",
+        r"\b(?:list\s+them|show\s+them|list\s+members|show\s+the\s+members|give\s+their\s+details|show\s+their\s+baptism\s+records|who\s+are\s+they|give\s+details|tell\s+me\s+more|show\s+family\s+members|list\s+all\s+members)\b",
+        r"\b(?:avanga|avangala|avangaloda|avangaluku|avangalku|ivanga)\b",
+        r"^(?:அவர்களின்|அவர்களை)\s+(?:விவரங்களை\s+காட்டு|பட்டியல்\s*இடு|பட்டியலிடு|விவரம்|பதிவுகள்)",
+    ]
+    words = q_clean.split()
+    if any(re.search(pat, q_clean, re.IGNORECASE) for pat in anaphoric_patterns):
+        is_anaphoric = True
+    elif len(words) <= 4 and any(w in q_clean for w in ["பட்டியல்", "காட்டு", "விவரம்", "உறுப்பினர்கள்", "list", "show", "details"]):
+        from koinonia_assistant.rag.tamil_utils import extract_person_entity_from_multilingual_query
+        ent = extract_person_entity_from_multilingual_query(q_clean)
+        if not ent.get("original_name"):
+            is_anaphoric = True
+
+    if not is_anaphoric:
+        return question, {}
+
+    card_no = None
+    person_name = None
+
+    for msg in reversed(history):
+        content = msg.get("content", "")
+        m_card = re.search(r"\b([A-Z]{2,5}/\d{1,5})\b", content, re.IGNORECASE)
+        if m_card and not card_no:
+            card_no = m_card.group(1).upper()
+
+        m_head = re.search(r"\b(?:Family\s*Name|Family\s*of|பங்கு\s*உறுப்பினர்|குடும்பம்|குடும்ப\s*பெயர்)[:\s\*]+([A-Za-z\.\s]+?)(?:\*|\n|\(|,|$)", content, re.IGNORECASE)
+        if m_head and not person_name:
+            cand = m_head.group(1).strip()
+            if len(cand) >= 3 and not any(w in cand.lower() for w in ["family", "parish", "card"]):
+                person_name = cand
+
+        m_bold_name = re.search(r"\*\*([A-Za-z\.\s]{3,35})\*\*", content)
+        if m_bold_name and not person_name:
+            cand = m_bold_name.group(1).strip()
+            if not any(w in cand.lower() for w in ["family", "parish", "card", "members", "total"]):
+                person_name = cand
+
+        from koinonia_assistant.rag.tamil_utils import TAMIL_NAME_DICTIONARY
+        for tam_n in TAMIL_NAME_DICTIONARY:
+            if tam_n in content and not person_name:
+                person_name = TAMIL_NAME_DICTIONARY[tam_n]
+                break
+
+        if card_no or person_name:
+            break
+
+    if not card_no and not person_name:
+        return question, {}
+
+    entity_ref = f"{person_name} (Card: {card_no})" if (person_name and card_no) else (person_name or f"Card: {card_no}")
+
+    is_list_members = any(w in q_clean for w in ["பட்டியல்", "பட்டியலிடு", "உறுப்பினர்", "members", "list", "who"])
+    is_details = any(w in q_clean for w in ["விவரம்", "விவரங்கள்", "details", "info"])
+    is_baptism = any(w in q_clean for w in ["திருமுழுக்கு", "ஞானஸ்நான", "baptism"])
+
+    if is_baptism:
+        resolved_q = f"{entity_ref} குடும்பத்தினரின் திருமுழுக்குப் பதிவுகள்" if "குடும்ப" in q_clean or not is_list_members else f"{entity_ref} திருமுழுக்கு நிலை என்ன?"
+    elif is_list_members:
+        resolved_q = f"{entity_ref} குடும்ப உறுப்பினர்களை பட்டியல் இடு"
+    elif is_details:
+        resolved_q = f"{entity_ref} குடும்ப விவரங்கள்"
+    else:
+        resolved_q = f"{entity_ref} குடும்ப விவரங்கள்"
+
+    inherited = {
+        "card_no": card_no,
+        "person_name": person_name,
+        "entity_ref": entity_ref,
+        "resolved_query": resolved_q,
+    }
+    return resolved_q, inherited
+
+
 def run_query(
     question: str,
     history: list = None,
@@ -2572,6 +2548,10 @@ def run_query(
     original_question = (question or "").strip()
     detected_lang = detect_query_language(original_question)
 
+    effective_question, inherited_entity = resolve_follow_up_context(original_question, history)
+    if inherited_entity:
+        print(f"[FollowUpContext] Anaphoric query resolved -> '{effective_question}' (Inherited: {inherited_entity})")
+
     print("\n" + "=" * 76)
     print(f"[BACKEND] REQUEST RECEIVED | request_id={req_id} | trace_id={trace_id} | lang={detected_lang}")
     print(f"[BACKEND] Original Query (Immutable): '{original_question}' | Role: {user_role} | Parish: {user_parish}")
@@ -2587,50 +2567,19 @@ def run_query(
         build_authorization_context,
         check_explicit_scope_violation,
     )
-    from koinonia_assistant.rag.followup_context import (
-        is_followup_reference,
-        extract_entity_context_from_history,
-        get_conversation_context,
-        save_conversation_context,
-        synthesize_followup_query,
-    )
-
-    followup_meta = is_followup_reference(original_question)
-    inherited_context = None
-    working_question = original_question
-    followup_intent_info = None
-
-    if followup_meta.get("is_followup"):
-        # 1. Try history first
-        inherited_context = extract_entity_context_from_history(history or [], default_parish=user_parish)
-        # 2. Try session / cache context fallback
-        cache_key = str(user_id or user_parish or "default")
-        if not inherited_context or (not inherited_context.get("person_name") and not inherited_context.get("family_card") and not inherited_context.get("family_id")):
-            cached = get_conversation_context(cache_key)
-            if cached:
-                inherited_context = cached
-
-        if inherited_context and (inherited_context.get("person_name") or inherited_context.get("family_card") or inherited_context.get("family_id")):
-            resolved_question, followup_intent_info = synthesize_followup_query(original_question, inherited_context, followup_meta)
-            print(f"[FOLLOW-UP INHERITANCE] Inherited Entity: {inherited_context}")
-            print(f"[FOLLOW-UP INHERITANCE] Original: '{original_question}' -> Synthesized: '{resolved_question}'")
-            working_question = resolved_question
-
-    pre_intent = followup_intent_info or classify_langgraph_intent(working_question)
-    corrected_question = pre_intent.get("corrected_query") or working_question
+    pre_intent = classify_langgraph_intent(effective_question)
     pre_auth = build_authorization_context(
         user_id=user_id or "User",
         user_role=user_role or "Parishioner",
         user_parish=user_parish,
         user_diocese=user_diocese,
     )
-    pre_scope_check = check_explicit_scope_violation(corrected_question, pre_auth, detected_language=detected_lang)
+    pre_scope_check = check_explicit_scope_violation(effective_question, pre_auth, detected_language=detected_lang)
 
-    # Build initial LangGraph state with `original_query` strictly equal to `original_question` and `corrected_query` for downstream execution
+    # Build initial LangGraph state with `question` and `original_query` strictly equal to `original_question`
     initial_state: GraphState = {
-        "question": corrected_question,
+        "question": effective_question,
         "original_query": original_question,
-        "corrected_query": corrected_question,
         "detected_language": detected_lang,
         "normalized_query": pre_intent.get("normalized_query", ""),
         "intent_query": pre_intent.get("intent_query", pre_intent.get("intent", "")),
@@ -2671,7 +2620,7 @@ def run_query(
         "analysis_metadata": None,
     }
 
-    # Guarantee LangSmith trace capture with original_query, corrected_query & authorization metadata
+    # Guarantee LangSmith trace capture with original_query & authorization metadata
     configure_langsmith()
     callbacks = []
     try:
@@ -2688,19 +2637,7 @@ def run_query(
             "request_id": req_id,
             "trace_id": trace_id,
             "original_query": original_question,
-            "corrected_query": corrected_question,
             "detected_language": detected_lang,
-            "normalized_query": pre_intent.get("normalized_query", ""),
-            "intent": pre_intent.get("semantic_intent") or pre_intent.get("intent_query") or pre_intent.get("intent", ""),
-            "entity": pre_intent.get("entity") or pre_intent.get("person_name") or "",
-            "entity_type": pre_intent.get("entity_type") or "PARISH",
-            "sacrament": pre_intent.get("sacrament") or "",
-            "time_range": pre_intent.get("time_range") or "",
-            "scope": pre_intent.get("scope") or "",
-            "authorized_scope": pre_auth.get("scope_name", "Diocesan Scope"),
-            "database_operation": pre_intent.get("database_operation") or "",
-            "corrections": pre_intent.get("corrections", []),
-            "correction_confidence": pre_intent.get("correction_confidence", "high"),
             "user_id": user_id or "User",
             "user_role": user_role,
             "user_parish": user_parish or "Diocesan Scope",
@@ -2718,73 +2655,13 @@ def run_query(
     s_tier = final_state.get("speed_tier") or "FAST"
     chart_payload = final_state.get("chart_data")
     disambig = final_state.get("disambiguation")
-    semantic_intent = pre_intent.get("semantic_intent") or pre_intent.get("intent_query") or c_intent
-
-    # Section 18 & Final Validation:
-    # 1) Never return parish-wide sacrament statistics for a family-member question
-    # 2) If semantic_intent is FAMILY_SACRAMENT_RECORDS or FAMILY_ALL_SACRAMENTS (target_scope == FAMILY_MEMBERS),
-    #    ensure the result includes EVERY member of the resolved family (never only the named person's sacrament).
-    if semantic_intent in ("FAMILY_SACRAMENT_RECORDS", "FAMILY_ALL_SACRAMENTS") and pre_intent.get("person_name"):
-        p_res = resolve_member_and_family(
-            corrected_question,
-            user_parish=pre_auth.get("scope_name") if pre_auth.get("scope_type") == "PARISH" else user_parish,
-            user_diocese=user_diocese,
-        )
-        if p_res.get("status") == "exact":
-            m_val = p_res.get("matched_member")
-            f_val = p_res.get("family_bundle") or {}
-            s_val = p_res.get("sacrament_bundle")
-            fam_members = f_val.get("members") or []
-            if len(raw_sql_res) < len(fam_members) or "Family Member" not in (raw_sql_res[0] if raw_sql_res and isinstance(raw_sql_res[0], dict) else {}):
-                print(f"[FINAL VALIDATION] Enforcing FAMILY_MEMBERS scope ({len(fam_members)} members) for {semantic_intent}.")
-                v_scope = pre_intent.get("scope") or "FAMILY_BAPTISM_RECORDS"
-                final_reply, val_suggs = render_scoped_response(
-                    v_scope, m_val, s_val, f_val, language="ta" if detected_lang == "ta" else "en"
-                )
-                final_state["suggested_questions"] = val_suggs
-                chart_payload = None
-                raw_sql_res = f_val.get("family_sacrament_rows") or fam_members
-    elif semantic_intent in ("FAMILY_MEMBER_COUNT", "FAMILY_MEMBER_LIST", "FAMILY_DETAILS") and pre_intent.get("person_name"):
-        if any(tbl in (gen_sql or "") for tbl in ("tabBaptism", "tabConfirmation", "tabCommunion", "tabMarriage")) and "tabMember" not in (gen_sql or ""):
-            print(f"[PRE-ANSWER VALIDATION] Re-routing {semantic_intent} for entity '{pre_intent.get('person_name')}' to prevent sacrament mismatch.")
-            p_res = resolve_member_and_family(
-                corrected_question,
-                user_parish=pre_auth.get("scope_name") if pre_auth.get("scope_type") == "PARISH" else user_parish,
-                user_diocese=user_diocese,
-            )
-            if p_res.get("status") == "exact":
-                m_val = p_res.get("matched_member")
-                f_val = p_res.get("family_bundle")
-                s_val = p_res.get("sacrament_bundle")
-                v_scope = pre_intent.get("scope") or p_res.get("response_scope") or "FAMILY_MEMBER_COUNT"
-                final_reply, val_suggs = render_scoped_response(
-                    v_scope, m_val, s_val, f_val, language="ta" if detected_lang == "ta" else "en"
-                )
-                final_state["suggested_questions"] = val_suggs
-                chart_payload = None
-                if v_scope == "FAMILY_MEMBER_COUNT":
-                    raw_sql_res = [{
-                        "Family Head": m_val.get("full_name", "N/A"),
-                        "Family Card": m_val.get("family_register_number", "N/A"),
-                        "Family Member Count": len((f_val or {}).get("members", [])),
-                    }]
-                else:
-                    raw_sql_res = (f_val or {}).get("members", [])
-
-    if disambig and disambig.get("options"):
-        suggested_qs = []
-    else:
-        suggested_qs = final_state.get("suggested_questions") or generate_follow_up_suggestions(original_question, raw_sql_res)
+    suggested_qs = final_state.get("suggested_questions") or generate_follow_up_suggestions(original_question, raw_sql_res)
 
     # Strip internal backend database ID columns from UI display rows (keep IDs backend-only)
     BACKEND_ONLY_ID_COLS = {
         "member_id", "Member ID", "member id",
         "family_id", "Family ID", "family id",
-        "name", "id", "ID", "is_family_head", "parish_bcc_id", "sacrament_bundle"
-    }
-    # Fields that end with _id but are display-safe (must NOT be stripped)
-    PASSTHROUGH_COLS = {
-        "relationship_id",   # DB column → Husband / Wife / Son / Daughter etc.
+        "name", "id", "ID", "is_family_head", "parish_bcc_id"
     }
     sql_res = []
     if isinstance(raw_sql_res, list):
@@ -2792,8 +2669,7 @@ def run_query(
             if isinstance(row, dict):
                 cleaned_row = {
                     k: v for k, v in row.items()
-                    if k not in BACKEND_ONLY_ID_COLS
-                    and (k in PASSTHROUGH_COLS or not str(k).lower().endswith("_id"))
+                    if k not in BACKEND_ONLY_ID_COLS and not str(k).lower().endswith("_id")
                 }
                 if cleaned_row:
                     sql_res.append(cleaned_row)
@@ -2812,65 +2688,14 @@ def run_query(
         forecast_period = f_obj.get("forecast_period")
         forecast_method = f_obj.get("method")
 
-    # Section 21: Debug Logging — Log full multilingual trace
     print("=" * 76)
     print(
-        f"[MULTILINGUAL TRACE] original_query='{original_question}' | detected_language='{detected_lang}' "
-        f"| normalized_query='{pre_intent.get('normalized_query', '')}' | intent='{semantic_intent}' "
-        f"| entity='{pre_intent.get('entity') or pre_intent.get('person_name') or ''}' "
-        f"| entity_type='{pre_intent.get('entity_type') or 'PARISH'}' "
-        f"| target_scope='{pre_intent.get('target_scope') or 'PARISH'}' "
-        f"| sacrament='{pre_intent.get('sacrament') or ''}' | time_range='{pre_intent.get('time_range') or ''}' "
-        f"| scope='{pre_intent.get('scope') or ''}' | authorized_scope='{auth_ctx_out.get('scope_name')}' "
-        f"| database_operation='{pre_intent.get('database_operation') or ''}' | result_count={len(sql_res)} "
+        f"[BACKEND] RESPONSE READY | request_id={req_id} | trace_id={trace_id} "
+        f"| lang={final_state.get('detected_language')} | intent={c_intent} "
+        f"| scope={auth_ctx_out.get('scope_name')} | auth_res={final_state.get('authorization_result')} "
         f"| time={processing_time}s"
     )
-    # Save resolved entity context for follow-up turns
-    try:
-        res_pname = (
-            (m_val.get("full_name") if "m_val" in locals() and m_val else None)
-            or pre_intent.get("person_name")
-            or pre_intent.get("entity")
-        )
-        res_card = (
-            (m_val.get("family_register_number") if "m_val" in locals() and m_val else None)
-            or (f_val.get("family", {}).get("family_register_number") if "f_val" in locals() and f_val else None)
-            or pre_intent.get("family_card")
-        )
-        res_fid = (
-            (m_val.get("family_id") if "m_val" in locals() and m_val else None)
-            or (f_val.get("family", {}).get("name") if "f_val" in locals() and f_val else None)
-            or pre_intent.get("family_id")
-        )
-        res_mid = (
-            (m_val.get("member_id") or m_val.get("name") if "m_val" in locals() and m_val else None)
-            or pre_intent.get("member_id")
-        )
-
-        if not res_card and final_reply:
-            m_c = re.search(r'\b([A-Z]{2,5}/\d{1,5})\b', final_reply)
-            if m_c:
-                res_card = m_c.group(1).upper()
-        if not res_pname and final_reply:
-            m_p = re.search(r"\*\*([A-Za-z\.\s]{3,40}?)\*\*(?:'s|’s)?\s+family", final_reply, re.IGNORECASE)
-            if m_p:
-                res_pname = m_p.group(1).strip()
-
-        if res_pname or res_card or res_fid:
-            save_conversation_context(
-                str(user_id or user_parish or "default"),
-                {
-                    "person_name": res_pname,
-                    "family_card": res_card,
-                    "family_id": res_fid,
-                    "member_id": res_mid,
-                    "parish": user_parish,
-                    "previous_intent": semantic_intent,
-                    "previous_scope": pre_intent.get("scope"),
-                }
-            )
-    except Exception as ctx_err:
-        print(f"[FollowupContext] Context persistence warning: {ctx_err}")
+    print("=" * 76)
 
     return {
         "request_id": req_id,
@@ -2881,15 +2706,6 @@ def run_query(
         "canonical_terms": final_state.get("canonical_terms", {}),
         "final_response_language": final_state.get("final_response_language", "ta" if detected_lang == "ta" else "en"),
         "intent": c_intent,
-        "semantic_intent": semantic_intent,
-        "entity": pre_intent.get("entity") or pre_intent.get("person_name"),
-        "entity_type": pre_intent.get("entity_type") or "PARISH",
-        "target_scope": pre_intent.get("target_scope") or "PARISH",
-        "sacrament": pre_intent.get("sacrament"),
-        "time_range": pre_intent.get("time_range"),
-        "requested_scope": pre_intent.get("scope"),
-        "database_operation": pre_intent.get("database_operation"),
-        "query_decomposition": pre_intent.get("query_decomposition"),
         "speed_tier": s_tier,
         "status": "success",
         "authorization_context": auth_ctx_out,

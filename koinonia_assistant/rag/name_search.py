@@ -258,7 +258,7 @@ def determine_response_scope(query_text: str) -> str:
     # Detect Sacrament terms (WHAT = SACRAMENT_RECORDS / ALL_SACRAMENTS)
     is_all_sacs = bool(
         re.search(r'\b(?:all\s+sacraments?|all\s+sacramental)\b', low)
-        or any(k in low for k in ['அனைத்து திருவருட்சாதன', 'அனைத்து அருட்சாதன', 'எல்லா திருவருட்சாதன'])
+        or any(k in low for k in ['அனைத்து திருவருட்சாதன', 'அனைத்து அருட்சாதன', 'எல்லா திருவருட்சாதன', 'திருவருட்சாதனங்கள்', 'திருவருட்சாதனங்களை', 'அருட்சாதனங்கள்', 'அருட்சாதனங்களை'])
     )
     has_baptism = bool(re.search(r'\b(?:baptism|baptisms|baptised|baptized)\b', low) or any(k in low for k in ['ஞானஸ்நானம்', 'ஞானஸ்நான', 'திருமுழுக்கு']))
     has_communion = bool(re.search(r'\b(?:communion|first\s+holy\s+communion|fhc|eucharist)\b', low) or any(k in low for k in ['நற்கருணை', 'முதல் நற்கருணை', 'புதுநன்மை', 'முதல் திருவிருந்து']))
@@ -267,7 +267,7 @@ def determine_response_scope(query_text: str) -> str:
     has_death = bool(re.search(r'\b(?:death|deceased|burial|died)\b', low) or any(k in low for k in ['இறப்பு', 'அடக்கம்']))
     has_generic_sac = bool(
         re.search(r'\b(?:sacraments?\s+details?|sacraments?\s+records?|sacramental\s+status|sacraments?|sacrements?)\b', low)
-        or any(k in low for k in ['அருட்சாதனம்', 'திருவருட்சாதனம்'])
+        or any(k in low for k in ['அருட்சாதன', 'திருவருட்சாதன'])
     )
     has_any_sacrament = bool(is_all_sacs or has_baptism or has_communion or has_confirmation or has_marriage or has_death or has_generic_sac)
 
@@ -309,7 +309,7 @@ def determine_response_scope(query_text: str) -> str:
     if bool(
         re.search(r'\b(?:family\s+members?|members\s+of\s+(?:the\s+)?family|members\s+of|yaar\s+yaar|yaar)\b', low)
         or re.search(r'\bwho\s+are\b.*\b(?:members|family|in)\b', low)
-        or any(k in low for k in ['குடும்ப உறுப்பினர்கள்', 'குடும்ப அங்கத்தினர்கள்', 'யார் யார்', 'குடும்பத்தில் யார்'])
+        or any(k in low for k in ['குடும்ப உறுப்பினர்கள்', 'குடும்ப உறுப்பினர்', 'குடும்ப அங்கத்தினர்கள்', 'யார் யார்', 'குடும்பத்தில் யார்', 'பட்டியல் இடு', 'பட்டியலிடு', 'உறுப்பினர்களை'])
     ):
         return 'FAMILY_MEMBERS_ONLY'
 
@@ -1477,7 +1477,7 @@ def build_family_sacrament_response(
         if is_ta:
             lines = [
                 f"### 🕊️ அனைத்து திருவருட்சாதனப் பதிவுகள் — {full_name} குடும்பம் (குடும்ப அட்டை: `{card_no}`)\n",
-                "| குடும்ப உறுப்பினர் (Family Member) | ஞானஸ்நானம் (Baptism) | முதல் நற்கருணை (First Communion) | உறுதிப்பூசுதல் (Confirmation) | திருமணம் (Marriage) |",
+                "| குடும்ப உறுப்பினர் (Family Member) | திருமுழுக்கு (Baptism) | முதல் நற்கருணை (First Communion) | உறுதிப்பூசுதல் (Confirmation) | திருமணம் (Marriage) |",
                 "| :--- | :--- | :--- | :--- | :--- |",
             ]
         else:
@@ -1502,7 +1502,7 @@ def build_family_sacrament_response(
             mrg_dt = (mrg_rec.get("mrg_date") if mrg_rec else None) or m.get("mrg_date")
 
             b_val = (f"பதிவு செய்யப்பட்டுள்ளது ({b_dt})" if b_dt else "பதிவு செய்யப்பட்டுள்ளது") if (b_dt or b_rec) and is_ta else (
-                (f"Baptized ({b_dt})" if b_dt else "Baptized") if (b_dt or b_rec) else ("ஞானஸ்நானப் பதிவு இல்லை" if is_ta else "No Baptism record found")
+                (f"Baptized ({b_dt})" if b_dt else "Baptized") if (b_dt or b_rec) else ("திருமுழுக்குப் பதிவு இல்லை" if is_ta else "No Baptism record found")
             )
             fhc_val = (f"பதிவு செய்யப்பட்டுள்ளது ({fhc_dt})" if fhc_dt else "பதிவு செய்யப்பட்டுள்ளது") if (fhc_dt or fhc_rec) and is_ta else (
                 (f"Received ({fhc_dt})" if fhc_dt else "Received") if (fhc_dt or fhc_rec) else ("முதல் நற்கருணைப் பதிவு இல்லை" if is_ta else "No Communion record found")
@@ -1525,7 +1525,7 @@ def build_family_sacrament_response(
 
         if is_ta:
             suggestions = [
-                f"{full_name} குடும்பத்தின் ஞானஸ்நானப் பதிவுகளை காட்டவும்",
+                f"{full_name} குடும்பத்தின் திருமுழுக்குப் பதிவுகளை காட்டவும்",
                 f"{full_name} குடும்ப உறுப்பினர்களின் விவரங்களை காட்டவும்",
                 f"{full_name} குடும்பத்தில் எத்தனை நபர்கள் உள்ளார்கள்?",
             ]
@@ -1541,16 +1541,16 @@ def build_family_sacrament_response(
     sac_map = {
         "FAMILY_BAPTISM_RECORDS": {
             "en_title": "BAPTISM RECORDS",
-            "ta_title": "ஞானஸ்நானப் பதிவுகள் (Baptism Records)",
+            "ta_title": "திருமுழுக்குப் பதிவுகள் (Baptism Records)",
             "en_col": "Baptism Status",
-            "ta_col": "ஞானஸ்நான நிலை (Baptism Status)",
+            "ta_col": "திருமுழுக்கு நிலை (Baptism Status)",
             "bundle_key": "baptism",
             "date_key": "bapt_date",
             "place_key": "bapt_place",
             "en_done": "Baptized",
-            "ta_done": "ஞானஸ்நானம் பெற்றுள்ளார்",
+            "ta_done": "திருமுழுக்கு பெற்றுள்ளார்",
             "en_missing": "No Baptism record found",
-            "ta_missing": "ஞானஸ்நானப் பதிவு இல்லை (No Baptism record found)",
+            "ta_missing": "திருமுழுக்குப் பதிவு இல்லை (No Baptism record found)",
         },
         "FAMILY_COMMUNION_RECORDS": {
             "en_title": "FIRST HOLY COMMUNION RECORDS",
@@ -1737,8 +1737,8 @@ def render_scoped_response(
             godfather = bap_rec.get("bapt_god_father") if bap_rec else None
             if is_ta:
                 lines = [
-                    f"**{full_name}** அவர்களின் ஞானஸ்நான (திருமுழுக்கு) நிலை:",
-                    f"- **நிலை:** ஞானஸ்நானம் பெற்றுள்ளார்",
+                    f"**{full_name}** அவர்களின் திருமுழுக்கு (Baptism) நிலை:",
+                    f"- **நிலை:** திருமுழுக்கு பெற்றுள்ளார்",
                     f"- **தேதி:** `{d_str}`",
                     f"- **பங்கு / இடம்:** {place}",
                 ]
@@ -1759,7 +1759,7 @@ def render_scoped_response(
             reply = "\n".join(lines)
         else:
             reply = (
-                f"**{full_name}** அவர்களுக்கு {parish} பதிவேட்டில் ஞானஸ்நானப் பதிவு எதுவும் இல்லை."
+                f"**{full_name}** அவர்களுக்கு {parish} பதிவேட்டில் திருமுழுக்குப் பதிவு எதுவும் இல்லை."
                 if is_ta
                 else f"**{full_name}** has no baptism record in {parish}."
             )
@@ -1913,7 +1913,7 @@ def render_scoped_response(
         if is_ta:
             lines = [
                 f"### 🕊️ {full_name} — திருவருட்சாதன விவரங்கள்:",
-                f"- **ஞானஸ்நானம் (Baptism):** {bap_str}",
+                f"- **திருமுழுக்கு (Baptism):** {bap_str}",
                 f"- **முதல் நற்கருணை (First Holy Communion):** {fhc_str}",
                 f"- **உறுதிப்பூசுதல் (Confirmation):** {cnf_str}",
                 f"- **திருமணம் (Marriage):** {mrg_str}",
@@ -1988,7 +1988,7 @@ def render_scoped_response(
             [
                 f"{full_name} குடும்பத்தின் தொடர்பு எண்ணை காட்டவும்",
                 f"{full_name} குடும்ப உறுப்பினர்களின் விவரங்களை காட்டவும்",
-                f"{full_name} அவர்களின் ஞானஸ்நான நிலை என்ன?",
+                f"{full_name} அவர்களின் திருமுழுக்கு நிலை என்ன?",
             ]
             if is_ta
             else [
@@ -2101,7 +2101,7 @@ def render_scoped_response(
             suggestions = [
                 f"{full_name} குடும்பத்தில் எத்தனை நபர்கள் உள்ளார்கள்?",
                 f"{full_name} குடும்ப உறுப்பினர்களின் விவரங்களை காட்டவும்",
-                f"{full_name} அவர்களின் ஞானஸ்நான நிலை என்ன?",
+                f"{full_name} அவர்களின் திருமுழுக்கு நிலை என்ன?",
             ]
         else:
             lines = [

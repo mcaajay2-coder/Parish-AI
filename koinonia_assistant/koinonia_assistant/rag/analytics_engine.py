@@ -358,6 +358,8 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             ),
             "person_entity": ta_info.get("person_entity"),
             "final_response_language": "ta",
+            "sub_intent": ta_info.get("sub_intent"),
+            "scope": ta_info.get("scope"),
         }
 
     # 3. English / Mixed Query Classification

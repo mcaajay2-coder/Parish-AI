@@ -66,13 +66,17 @@ CATHOLIC_TAMIL_TERMINOLOGY_DB: List[Dict[str, Any]] = [
         "category": "SACRAMENT",
         "code": "BAPTISM",
         "metric_key": "baptism",
-        "canonical_term": "ஞானஸ்நானம்",
-        "secondary_term": "திருமுழுக்கு",
+        "canonical_term": "திருமுழுக்கு",
+        "secondary_term": "ஞானஸ்நானம்",
         "english_term": "Baptism",
         "aliases": [
             "திருமுழுக்கு",
             "திருமுழுக்குச் சடங்கு",
             "திருமுழுக்கு சடங்கு",
+            "திருமுழுக்குகள்",
+            "திருமுழுக்கின்",
+            "திருமுழுக்குத்",
+            "திருமுழுக்கு பெற்ற",
             "ஞானஸ்நானம்ச் சடங்குகள்",
             "ஞானஸ்நானச் சடங்குகள்",
             "ஞானஸ்நானச் சடங்கு",
@@ -80,9 +84,10 @@ CATHOLIC_TAMIL_TERMINOLOGY_DB: List[Dict[str, Any]] = [
             "ஞானஸ்நானங்கள்",
             "ஞானஸ்நானம்",
             "ஞானஸ்நான",
-            "ஞானस्नाనం",
+            "ஞானஸ்தானம்",
             "gnanasnanam",
             "thirumulukku",
+            "thirumuzhukku",
             "baptism",
             "baptisms",
             "baptism record",
@@ -97,7 +102,7 @@ CATHOLIC_TAMIL_TERMINOLOGY_DB: List[Dict[str, Any]] = [
         "code": "FIRST_HOLY_COMMUNION",
         "metric_key": "communion",
         "canonical_term": "முதல் நற்கருணை",
-        "secondary_term": "முதல் திருவிருந்து",
+        "secondary_term": "நற்கருணை",
         "english_term": "First Holy Communion",
         "aliases": [
             "முதல் நற்கருணை",
@@ -124,13 +129,14 @@ CATHOLIC_TAMIL_TERMINOLOGY_DB: List[Dict[str, Any]] = [
         "code": "CONFIRMATION",
         "metric_key": "confirmation",
         "canonical_term": "உறுதிப்பூசுதல்",
-        "secondary_term": "உறுதிப்படுத்துதல்",
+        "secondary_term": "உறுதிபூசுதல்",
         "english_term": "Confirmation",
         "aliases": [
             "உறுதிப்பூசுதல்",
             "உறுதிபூசுதல்",
             "உறுதிப்படுத்துதல்",
             "உறுதிப்படுத்தல்",
+            "ஸ்திரப்படுத்தல்",
             "urudhipoosuthal",
             "confirmation",
             "confirmations",
@@ -152,10 +158,56 @@ CATHOLIC_TAMIL_TERMINOLOGY_DB: List[Dict[str, Any]] = [
             "திருமணங்கள்",
             "திருமண",
             "விவாகம்",
+            "கல்யாணம்",
             "thirumanam",
             "marriage",
             "marriages",
             "wedding",
+        ],
+        "active": True,
+    },
+    {
+        "term_id": "SAC_ANOINTING",
+        "language": "ta",
+        "category": "SACRAMENT",
+        "code": "ANOINTING",
+        "metric_key": "anointing",
+        "canonical_term": "நோயில் பூசுதல்",
+        "secondary_term": "கடைசிப் பூசுதல்",
+        "english_term": "Anointing of the Sick",
+        "aliases": [
+            "நோயில் பூசுதல்",
+            "நோயாளரின் பூசுதல்",
+            "கடைசிப் பூசுதல்",
+            "அவஸ்தை பூசுதல்",
+            "அவஸ்தைப்பூசுதல்",
+            "நோயில்பூசுதல்",
+            "anointing",
+            "anointing of the sick",
+            "anointing of sick",
+        ],
+        "active": True,
+    },
+    {
+        "term_id": "SAC_DEATH",
+        "language": "ta",
+        "category": "SACRAMENT",
+        "code": "DEATH",
+        "metric_key": "death",
+        "canonical_term": "இறப்பு",
+        "secondary_term": "அடக்கம்",
+        "english_term": "Death / Burial",
+        "aliases": [
+            "இறப்பு",
+            "அடக்கம்",
+            "மரண பதிவு",
+            "மரணப்பதிவு",
+            "மரண",
+            "மரணம்",
+            "பாடை",
+            "death",
+            "burial",
+            "deceased",
         ],
         "active": True,
     },
@@ -277,21 +329,75 @@ CATHOLIC_TAMIL_TERMINOLOGY_DB: List[Dict[str, Any]] = [
 
 # ─── 3. Tamil Person Name Dictionary & Entity Extraction Helpers ─────────────
 TAMIL_NAME_DICTIONARY = {
-    "அந்தோணி ராஜ்": "Antony Raj",
-    "அந்தோனி ராஜ்": "Antony Raj",
-    "அந்தோனிராஜ்": "Antony Raj",
-    "அந்தோணிராஜ்": "Antony Raj",
-    "அந்தோணி செல்வம்": "Antony Selvam",
-    "அந்தோனி செல்வம்": "Antony Selvam",
+    # Full compound & spaced names
     "அந்தோணி செல்வன்": "Antony Selvan",
     "அந்தோனி செல்வன்": "Antony Selvan",
+    "அந்தோணிசெல்வன்": "Antony Selvan",
+    "அந்தோனிசெல்வன்": "Antony Selvan",
+    "அந்தோணி செல்வம்": "Antony Selvan",
+    "அந்தோனி செல்வம்": "Antony Selvan",
+    "ஆண்டனி செல்வன்": "Antony Selvan",
+    "அந்தோணி ராஜ்": "Antony Raj",
+    "அந்தோனி ராஜ்": "Antony Raj",
+    "அந்தோணிராஜ்": "Antony Raj",
+    "அந்தோனிராஜ்": "Antony Raj",
+    
+    # Cathrine Suganya
+    "கேத்ரின் சுகன்யா": "Cathrine Suganya",
+    "கேத்தரின் சுகன்யா": "Cathrine Suganya",
+    "கேதரின் சுகன்யா": "Cathrine Suganya",
+    "கேத்ரின்சுகன்யா": "Cathrine Suganya",
+    "கேத்தரின்சுகன்யா": "Cathrine Suganya",
+    "கேத்ரின்": "Cathrine",
+    "கேத்தரின்": "Cathrine",
+    "சுகன்யா": "Suganya",
+
+    # Sapphire Chrispin & Siara Chrispin
+    "சபையர் கிரிஸ்பின்": "Sapphire Chrispin",
+    "சபையர்கிரிஸ்பின்": "Sapphire Chrispin",
+    "சபையர்": "Sapphire",
+    "சியாரா கிரிஸ்பின்": "Siara Chrispin",
+    "சியாராகிரிஸ்பின்": "Siara Chrispin",
+    "சியாரா": "Siara",
+    "கிரிஸ்பின்": "Chrispin",
+
+    # Arokiaraj / Arokiamary / Arokia
+    "ஆரோக்கியராஜ்": "Arokiaraj",
+    "ஆரோக்கிய ராஜ்": "Arokiaraj",
+    "அரோக்கியராஜ்": "Arokiaraj",
+    "அரோக்கிய ராஜ்": "Arokiaraj",
+    "ஆரோக்கியமேரி": "Arokiamary",
+    "ஆரோக்கிய மேரி": "Arokiamary",
+    "அரோக்கியமேரி": "Arokiamary",
+    "ஆரோக்கிய": "Arokia",
+    "அரோக்கிய": "Arokia",
     "ஆரோக்கியதாஸ்": "Arokiadass",
+
+    # Sahayaraj / Sahayamary / Sagaya
     "சகாயராஜ்": "Sahayaraj",
-    "குழந்தைராஜ்": "Kulandairaj",
-    "அற்புதராஜ்": "Arputharaj",
+    "சகாய ராஜ்": "Sahayaraj",
+    "சகாயமேரி": "Sahayamary",
+    "சகாய மேரி": "Sahayamary",
+    "சகாய": "Sahaya",
+
+    # Christuraj / Christuraja / Christopher
+    "கிறிஸ்துராஜ்": "Christuraj",
+    "கிறிஸ்து ராஜ்": "Christuraj",
+    "கிறிஸ்துராஜா": "Christuraja",
+    "கிறிஸ்டோபர்": "Christopher",
+
+    # Roselin / Roseline
     "ரோஸ்லின்": "Roselin",
     "ரோசலின்": "Roselin",
     "ரோஸ்லைன்": "Roseline",
+
+    # Other Yelagiri Parish names
+    "டேனியல்": "Daniel",
+    "அல்போன்ஸ்": "Alphones",
+    "அமல்": "Amal",
+    "அமலி": "Amali",
+    "அருள்": "Arul",
+    "ஆல்பர்ட்": "Albert",
     "அந்தோணி": "Antony",
     "அந்தோனி": "Antony",
     "ஆண்டனி": "Antony",
@@ -299,7 +405,6 @@ TAMIL_NAME_DICTIONARY = {
     "ராஜா": "Raja",
     "செல்வம்": "Selvam",
     "செல்வன்": "Selvan",
-    "ஆல்பர்ட்": "Albert",
     "ரட்சகர்": "Ratchagar",
     "மரிய": "Mary",
     "மேரி": "Mary",
@@ -314,7 +419,7 @@ TAMIL_NAME_DICTIONARY = {
 }
 
 TAMIL_INITIALS_MAP = {
-    "எஸ்": "S", "ஏ": "A", "பி": "B", "சி": "C", "டி": "D",
+    "எஸ்": "S", "ஏ": "A", "பி": "P", "சி": "C", "டி": "D",
     "இ": "E", "எப்": "F", "ஜி": "G", "ஐ": "I", "ஜே": "J",
     "கே": "K", "எல்": "L", "எம்": "M", "என்": "N", "ஆர்": "R", "வி": "V",
 }
@@ -429,6 +534,25 @@ def transliterate_tamil_name(name_str: str) -> str:
     return re.sub(r"\s+", " ", " ".join(out)).strip()
 
 
+def strip_tamil_case_endings(w: str) -> str:
+    """
+    Strips Tamil grammatical case endings (-க்கு, -இன், -வின், -உடைய, -இடம், -அவர்கள்)
+    restoring consonants with virama to base nominative forms (e.g. ராஜுக்கு -> ராஜ், தாசுக்கு -> தாஸ், செல்வனுக்கு -> செல்வன்).
+    """
+    if not w:
+        return ""
+    w = re.sub(r'\s*(?:அவர்கள்|அவர்களின்|உடைய|இடம்|குடும்பம்|குடும்பத்தில்|குடும்பத்தின்|விவரம்|விவரங்கள்)$', '', w).strip()
+    w = re.sub(r'னுக்கு$', 'ன்', w)
+    w = re.sub(r'னின்$', 'ன்', w)
+    w = re.sub(r'வுக்கு$', '', w)
+    w = re.sub(r'வின்$', '', w)
+    w = re.sub(r'ஜுக்கு$', 'ஜ்', w)
+    w = re.sub(r'சுக்கு$', 'ஸ்', w)
+    w = re.sub(r'ஸின்$', 'ஸ்', w)
+    w = re.sub(r'[-–—]?க்கு$', '', w).strip()
+    return w
+
+
 def normalize_tamil_person_entity(raw_name: str) -> Dict[str, Optional[str]]:
     """
     Returns separate representations for a person name (Section 15):
@@ -439,7 +563,7 @@ def normalize_tamil_person_entity(raw_name: str) -> Dict[str, Optional[str]]:
     if not raw_name:
         return {"original_name": None, "normalized_name": None, "transliterated_name": None}
     orig = raw_name.strip()
-    norm_ta = re.sub(r"(?:யின்|வின்|ன்|க்கு|உடைய|அவர்களின்|அவர்கள்|-க்கு|-ல்|-இல்)$", "", orig).strip()
+    norm_ta = strip_tamil_case_endings(orig)
     trans = transliterate_tamil_name(norm_ta) if is_tamil(norm_ta) else norm_ta
     return {
         "original_name": orig,
@@ -466,10 +590,34 @@ def extract_person_entity_from_multilingual_query(query_text: str) -> Dict[str, 
     q_no_cards = re.sub(r"\b[A-Z]{2,5}/\d{1,5}\b", "", query_text, flags=re.IGNORECASE)
     q_no_cards = re.sub(r"\s*\((?:Member\s*ID|Family\s*ID|Family|ID|Card)[:\s0-9A-Za-z,\s\-/]+\)", "", q_no_cards, flags=re.IGNORECASE)
 
-    # 1. Check known Tamil dictionary names first
+    clean_ta = strip_tamil_case_endings(q_no_cards)
+
+    # 1. Check known Tamil dictionary names first (with Initial and Compound detection)
     for tam_name in sorted(TAMIL_NAME_DICTIONARY.keys(), key=len, reverse=True):
-        if tam_name in q_no_cards:
-            return normalize_tamil_person_entity(tam_name)
+        if tam_name in clean_ta:
+            base_eng = TAMIL_NAME_DICTIONARY[tam_name]
+            # Check Latin initial (preceding or following)
+            m_lat_post = re.search(rf"{re.escape(tam_name)}\s*([A-Za-z])(?:\.|\b)", clean_ta)
+            m_lat_pre = re.search(rf"\b([A-Za-z])(?:\.|\s+)\s*{re.escape(tam_name)}", clean_ta)
+            # Check Tamil initial (preceding or following)
+            m_ta_post = re.search(rf"{re.escape(tam_name)}\s*([\u0B80-\u0BFF]+)(?:\b|$)", clean_ta)
+            m_ta_pre = re.search(rf"^\s*([\u0B80-\u0BFF]+)\s+{re.escape(tam_name)}", clean_ta)
+
+            final_trans = base_eng
+            if m_lat_post:
+                final_trans = f"{base_eng} {m_lat_post.group(1).upper()}"
+            elif m_lat_pre:
+                final_trans = f"{m_lat_pre.group(1).upper()} {base_eng}"
+            elif m_ta_post and m_ta_post.group(1) in TAMIL_INITIALS_MAP:
+                final_trans = f"{base_eng} {TAMIL_INITIALS_MAP[m_ta_post.group(1)]}"
+            elif m_ta_pre and m_ta_pre.group(1) in TAMIL_INITIALS_MAP:
+                final_trans = f"{TAMIL_INITIALS_MAP[m_ta_pre.group(1)]} {base_eng}"
+
+            return {
+                "original_name": tam_name,
+                "normalized_name": tam_name,
+                "transliterated_name": final_trans,
+            }
 
     # 2. Extract contiguous Latin name tokens (handles Mixed Tamil-English & Tanglish & English)
     # Strip attached Tamil suffixes like '-க்கு', '-ல்', 'க்கு', 'யின்' from Latin tokens
@@ -495,7 +643,7 @@ def extract_person_entity_from_multilingual_query(query_text: str) -> Dict[str, 
 
     # 3. Pure Tamil query prefix before 'குடும்ப' / 'அவர்களின்' / 'அவர்கள்' / 'என்பவரின்'
     # Guard against time/aggregate queries and pronoun follow-ups starting with pronouns or time words
-    if not re.match(r"^\s*(?:கடந்த|இந்த|அடுத்த|முந்தைய|போன|நடப்பு|ஒவ்வொரு|மொத்தம்|எத்தனை|நமது|எங்கள்|பங்கில்|பங்கு|யார்|என்ன|எப்படி|எவ்வாறு|அவர்கள்|அவர்களை|அவர்களின்|அவர்களுடைய|அவர்|அவரை|அவரின்|இவர்|இவரை|இவர்கள்|இவர்களை|இவர்களின்)\b", q_no_cards):
+    if not re.match(r"^\s*(?:கடந்த|இந்த|அடுத்த|முந்தைய|போன|நடப்பு|ஒவ்வொரு|மொத்தம்|எத்தனை|நமது|எங்கள்|பங்கில்|பங்கு|ஏலகிரி|மறைமாவட்டம்|கோவில்|ஆலயம்|யார்|என்ன|எப்படி|எவ்வாறு|அவர்கள்|அவர்களை|அவர்களின்|அவர்களுடைய|அவர்|அவரை|அவரின்|இவர்|இவரை|இவர்கள்|இவர்களை|இவர்களின்)\b", q_no_cards):
         m_ta_prefix = re.search(
             r"^\s*([\u0B80-\u0BFF\s]{3,40}?)\s+(?:குடும்பம்|குடும்பத்தில்|குடும்பத்தின்|குடும்ப|அவர்களின்|அவர்கள்|என்பவரின்|என்பவர்)",
             q_no_cards,
@@ -505,7 +653,8 @@ def extract_person_entity_from_multilingual_query(query_text: str) -> Dict[str, 
             ta_stopwords = {
                 "கடந்த", "அடுத்த", "இந்த", "முந்தைய", "போன", "நடப்பு", "ஆண்டு", "ஆண்டுகள்",
                 "ஆண்டுகளில்", "ஆண்டுகளின்", "வருடம்", "வருடங்கள்", "வருடங்களில்", "மாதம்",
-                "மொத்தம்", "எத்தனை", "நமது", "எங்கள்", "பங்கில்", "பங்கு", "ஒவ்வொரு", "அனைத்து",
+                "மொத்தம்", "எத்தனை", "நமது", "எங்கள்", "பங்கில்", "பங்கு", "ஏலகிரி", "ஏலகிரியில்",
+                "மறைமாவட்டம்", "மறைவட்டம்", "அன்பியம்", "கோவில்", "ஆலயம்", "ஒவ்வொரு", "அனைத்து",
                 "யார்", "என்ன", "எப்படி", "எவ்வாறு",
                 "அவர்கள்", "அவர்களை", "அவர்களின்", "அவர்களுடைய", "அவர்", "அவரை", "அவரின்", "அவருடைய",
                 "இவர்", "இவரை", "இவர்கள்", "இவர்களை", "இவர்களின்", "இவருடைய"
@@ -797,7 +946,7 @@ def extract_tamil_structured_intent(original_query: str) -> Dict[str, Any]:
         entity_val = primary_sacrament_code or "AUTHORIZED_PARISH"
         target_scope = "PARISH"
 
-        if has_comparison and (has_time_expr or has_trend or has_stats):
+        if (has_comparison and (has_time_expr or has_trend or has_stats or len(metrics) >= 2)) or (len(metrics) >= 2 and (has_time_expr or has_trend or has_stats)):
             semantic_intent = "COMPARISON"
             langgraph_intent = "COMPARISON"
             requested_info = "multi_sacrament_comparison"

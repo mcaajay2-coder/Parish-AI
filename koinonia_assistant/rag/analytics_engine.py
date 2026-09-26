@@ -321,8 +321,8 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             "final_response_language": "ta" if lang == "ta" else "en",
         }
 
-    # 2. Direct Tamil & Tanglish Structured Understanding (Sections 1–16)
-    if lang in ("ta", "tanglish"):
+    # 2. Direct Tamil Structured Understanding (when Tamil script is present)
+    if lang == "ta":
         ta_info = extract_tamil_structured_intent(q_clean)
         t_intent = ta_info["intent"]
         t_metrics = ta_info["metrics"]
@@ -337,177 +337,32 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
 
         return {
             "original_query": q_clean,
-            "detected_language": "ta" if is_tamil(q_clean) else lang,
-            "language": lang,
+            "detected_language": "ta",
             "normalized_query": ta_info["normalized_query"],
             "intent_query": ta_info["intent_query"],
             "entity_query": ta_info["entity_query"],
             "canonical_terms": ta_info["canonical_terms"],
             "sacrament": ta_info["sacrament"],
             "period": ta_info["period"],
-            "time_range": ta_info.get("time_range"),
-            "target_year": ta_info.get("target_year"),
             "grouping": ta_info["grouping"],
             "intent": t_intent,
-            "semantic_intent": ta_info.get("semantic_intent", t_intent),
-            "entity_type": ta_info.get("entity_type", "NONE"),
-            "entity": ta_info.get("entity"),
-            "target_scope": ta_info.get("target_scope", "PARISH"),
-            "requested_information": ta_info.get("requested_information"),
-            "database_operation": ta_info.get("database_operation"),
-            "query_decomposition": ta_info.get("query_decomposition"),
-            "scope": ta_info.get("scope", "GENERAL_MEMBER"),
-            "sub_intent": ta_info.get("sub_intent"),
-            "chart_requested": ta_info.get("chart_requested", False),
             "speed_tier": s_tier,
             "metrics": t_metrics,
             "years_back": t_years,
             "forecast_horizon": t_horizon,
             "include_forecast": t_intent == "FORECAST" or t_horizon > 0,
             "family_card": ta_info.get("family_card"),
-            "person_name": ta_info.get("person_name"),
-            "person_entity": ta_info.get("person_entity"),
-            "final_response_language": "ta" if is_tamil(q_clean) else "en",
-        }
-
-    # 3. English / Mixed Query Preprocessing & Classification (Sections 1-16)
-    from koinonia_assistant.rag.name_search import preprocess_user_query, classify_query_intent
-    prep_info = preprocess_user_query(q_clean)
-    q_corr = prep_info.get("corrected_query") or q_clean
-    q_low = q_corr.lower()
-
-    # Priority 0: Check if a specific Person or Family Card entity is present BEFORE parish-wide analytics/counts (Section 4 & 15)
-    q_person_info = classify_query_intent(question)
-    early_person = q_person_info.get("person_name")
-    early_scope = q_person_info.get("scope", "GENERAL_MEMBER")
-    m_sac_count_early = re.search(r"\b(?:who\s+)?(?:got|received|have|with|having)\s+(\d+)\s+(?:sacraments?|sacrements?)\b", q_low)
-    m_card_early = re.search(r"\b([A-Z]{2,5}/\d{1,5})\b", question, re.IGNORECASE)
-
-    if (early_person and not m_sac_count_early) or m_card_early:
-        sac_code_early = None
-        target_scope_early = "SINGLE_PERSON"
-        req_info_early = "PERSON_DETAILS"
-        fam_ref_early = None
-
-        if early_scope in (
-            "FAMILY_BAPTISM_RECORDS",
-            "FAMILY_COMMUNION_RECORDS",
-            "FAMILY_CONFIRMATION_RECORDS",
-            "FAMILY_MARRIAGE_RECORDS",
-            "FAMILY_DEATH_RECORDS",
-        ):
-            c_int = "SACRAMENT_SEARCH"
-            sem_int = "FAMILY_SACRAMENT_RECORDS"
-            target_scope_early = "FAMILY_MEMBERS"
-            req_info_early = "SACRAMENT_RECORDS"
-            db_op = "LOOKUP_FAMILY_SACRAMENT_RECORDS"
-            fam_ref_early = early_person or (m_card_early.group(1) if m_card_early else None)
-            sac_code_map = {
-                "FAMILY_BAPTISM_RECORDS": "BAPTISM",
-                "FAMILY_COMMUNION_RECORDS": "FIRST_HOLY_COMMUNION",
-                "FAMILY_CONFIRMATION_RECORDS": "CONFIRMATION",
-                "FAMILY_MARRIAGE_RECORDS": "MARRIAGE",
-                "FAMILY_DEATH_RECORDS": "DEATH",
-            }
-            sac_code_early = sac_code_map.get(early_scope, "BAPTISM")
-        elif early_scope == "FAMILY_ALL_SACRAMENTS":
-            c_int = "SACRAMENT_SEARCH"
-            sem_int = "FAMILY_ALL_SACRAMENTS"
-            target_scope_early = "FAMILY_MEMBERS"
-            req_info_early = "ALL_SACRAMENTS"
-            db_op = "LOOKUP_FAMILY_ALL_SACRAMENTS"
-            fam_ref_early = early_person or (m_card_early.group(1) if m_card_early else None)
-            sac_code_early = "ALL_SACRAMENTS"
-        elif early_scope == "FAMILY_MEMBER_COUNT":
-            c_int = "FAMILY_SEARCH"
-            sem_int = "FAMILY_MEMBER_COUNT"
-            target_scope_early = "FAMILY_MEMBERS"
-            req_info_early = "MEMBER_COUNT"
-            db_op = "COUNT_FAMILY_MEMBERS"
-            fam_ref_early = early_person
-        elif early_scope == "FAMILY_MEMBERS_ONLY":
-            c_int = "FAMILY_SEARCH"
-            sem_int = "FAMILY_MEMBER_LIST"
-            target_scope_early = "FAMILY_MEMBERS"
-            req_info_early = "MEMBER_LIST"
-            db_op = "LIST_FAMILY_MEMBERS"
-            fam_ref_early = early_person
-        elif early_scope == "FAMILY_DETAILS":
-            c_int = "FAMILY_SEARCH"
-            sem_int = "FAMILY_CARD_LOOKUP" if m_card_early else "FAMILY_DETAILS"
-            target_scope_early = "FAMILY_MEMBERS"
-            req_info_early = "FAMILY_DETAILS"
-            db_op = "RETRIEVE_FAMILY_BY_ID"
-            fam_ref_early = early_person or (m_card_early.group(1) if m_card_early else None)
-        elif early_scope in ("BAPTISM_STATUS", "CONFIRMATION_STATUS", "COMMUNION_STATUS", "MARRIAGE_STATUS", "DEATH_STATUS", "ALL_SACRAMENTS"):
-            c_int = "SACRAMENT_SEARCH"
-            sem_int = "PERSON_SACRAMENT_STATUS"
-            target_scope_early = "SINGLE_PERSON"
-            req_info_early = "SACRAMENT_STATUS"
-            db_op = "LOOKUP_MEMBER_SACRAMENT"
-            single_sac_map = {
-                "BAPTISM_STATUS": "BAPTISM",
-                "COMMUNION_STATUS": "FIRST_HOLY_COMMUNION",
-                "CONFIRMATION_STATUS": "CONFIRMATION",
-                "MARRIAGE_STATUS": "MARRIAGE",
-                "DEATH_STATUS": "DEATH",
-                "ALL_SACRAMENTS": "ALL_SACRAMENTS",
-            }
-            sac_code_early = single_sac_map.get(early_scope, "BAPTISM")
-        elif early_scope in ("MEMBER_PHONE", "MEMBER_ADDRESS"):
-            c_int = "MEMBER_SEARCH"
-            sem_int = "MEMBER_CONTACT"
-            target_scope_early = "SINGLE_PERSON"
-            req_info_early = "MEMBER_CONTACT"
-            db_op = "LOOKUP_MEMBER_CONTACT"
-        else:
-            c_int = "MEMBER_SEARCH"
-            sem_int = "PERSON_DETAILS"
-            target_scope_early = "SINGLE_PERSON"
-            req_info_early = "PERSON_DETAILS"
-            db_op = "LOOKUP_PERSON"
-
-        q_decomp = {
-            "intent": sem_int,
-            "person": early_person,
-            "family_reference": fam_ref_early,
-            "target_scope": target_scope_early,
-            "requested_information": req_info_early,
-            "sacrament": sac_code_early,
-            "time_range": None,
-        }
-
-        return {
-            "original_query": q_clean,
-            "corrected_query": q_corr,
-            "detected_language": lang,
-            "language": lang,
-            "normalized_query": (
-                f"INTENT={sem_int} | LG_INTENT={c_int} | TARGET_SCOPE={target_scope_early} "
-                f"| SACRAMENT={sac_code_early or 'NONE'} | SCOPE={early_scope} "
-                f"| ENTITY={early_person or (m_card_early.group(1) if m_card_early else 'ID')}"
+            "person_name": (
+                ta_info["person_entity"].get("transliterated_name")
+                or ta_info["person_entity"].get("original_name")
             ),
-            "intent_query": sem_int,
-            "entity_query": early_person or (m_card_early.group(1) if m_card_early else "ID"),
-            "intent": c_int,
-            "semantic_intent": sem_int,
-            "entity_type": "FAMILY_CARD" if m_card_early else ("FAMILY" if target_scope_early == "FAMILY_MEMBERS" else "PERSON"),
-            "entity": m_card_early.group(1) if m_card_early else early_person,
-            "target_scope": target_scope_early,
-            "requested_information": req_info_early,
-            "database_operation": db_op,
-            "query_decomposition": q_decomp,
-            "sacrament": sac_code_early,
-            "scope": early_scope,
-            "person_name": early_person,
-            "family_card": m_card_early.group(1).upper() if m_card_early else None,
-            "speed_tier": "FAST",
-            "metrics": [],
-            "years_back": 0,
-            "forecast_horizon": 0,
-            "final_response_language": "en",
+            "person_entity": ta_info.get("person_entity"),
+            "final_response_language": "ta",
+            "sub_intent": ta_info.get("sub_intent"),
+            "scope": ta_info.get("scope"),
         }
 
+    # 3. English / Mixed Query Classification
     metrics = []
     canonical_terms = {}
     if any(w in q_low for w in ["baptism", "baptized", "baptised", "christening"]):
@@ -563,11 +418,6 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
 
     base_meta = {
         "original_query": q_clean,
-        "corrected_query": q_corr,
-        "intent_text": prep_info.get("intent_text", ""),
-        "entity_text": prep_info.get("entity_text", ""),
-        "corrections": prep_info.get("corrections", []),
-        "correction_confidence": prep_info.get("correction_confidence", "high"),
         "detected_language": lang,
         "canonical_terms": canonical_terms,
         "sacrament": SACRAMENT_METRICS[metrics[0]]["code"] if metrics else None,
@@ -1284,11 +1134,12 @@ def generate_dynamic_suggested_questions(
     scope_name = (auth_ctx or {}).get("scope_name") or "Yelagiri Parish"
 
     if detected_language == "ta":
-        ta_sac = "ஞானஸ்நான" if primary_m == "baptism" else meta["ta_label"]
+        ta_sac = meta["ta_label"]
+        other_ta = "திருமுழுக்கு" if primary_m != "baptism" else "முதல் நற்கருணை"
         return [
-            f"கடந்த 10 ஆண்டுகளின் {ta_sac} எண்ணிக்கையை காட்டவும்",
-            f"{ta_sac} எண்ணிக்கையில் ஏற்பட்ட மாற்றத்தை காட்டவும்",
-            f"அடுத்த 10 ஆண்டுகளுக்கான {ta_sac} கணிப்பை காட்டவும்",
+            f"கடந்த 10 ஆண்டுகளில் {other_ta} எண்ணிக்கை என்ன?",
+            f"{ta_sac} எண்ணிக்கையில் ஏற்பட்ட மாற்றத்தை காட்டு",
+            f"அடுத்த 10 ஆண்டுகளுக்கான {ta_sac} கணிப்பை வழங்கவும்",
         ]
     else:
         eng_sac = meta["label"]
