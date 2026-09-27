@@ -1116,8 +1116,11 @@ def execute_parish_statistics(
     - Sacrament event totals (e.g. baptisms in 2024)
     """
     import frappe
-    if not frappe.db:
-        frappe.connect()
+    if not getattr(frappe, "db", None):
+        try:
+            frappe.connect()
+        except Exception:
+            pass
 
     is_ta = language == "ta"
     scope_name = user_parish or user_diocese or "your authorized parish"
