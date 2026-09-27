@@ -166,7 +166,14 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
     if not query_text:
         return {"error": "No text or audio query provided."}
 
-    # Preserve original_query as immutable source of truth (Sections 24–27, 48)
+    # Check input_mode (chat vs voice)
+    input_mode = kwargs.get("input_mode") or (frappe.form_dict.get("input_mode") if hasattr(frappe, "form_dict") and frappe.form_dict else None)
+    if has_audio_file or (isinstance(input_mode, str) and input_mode.lower() == "voice"):
+        input_mode = "voice"
+    else:
+        input_mode = "chat"
+
+    # Preserve original_query as immutable source of truth (Sections 24–27, 48, Rule 2)
     original_query = query_text.strip()
     raw_stt_text = original_query
     from koinonia_assistant.rag.tamil_utils import is_tamil, detect_query_language
@@ -204,9 +211,9 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
     _ensure_langsmith_env()
     import uuid
     req_id = kwargs.get("request_id") or (frappe.form_dict.get("request_id") if hasattr(frappe, "form_dict") and frappe.form_dict else None) or str(uuid.uuid4())
-    print(f"[BACKEND API] REQUEST RECEIVED | request_id={req_id} | lang={detected_lang} | User={user_email} | Role={user_role} | Parish={user_parish} | original_query='{original_query}'")
+    print(f"[BACKEND API] REQUEST RECEIVED | request_id={req_id} | lang={detected_lang} | input_mode={input_mode} | User={user_email} | Role={user_role} | Parish={user_parish} | original_query='{original_query}'")
 
-    # 3. Invoke LangGraph RAG pipeline with the EXACT original_query
+    # 3. Invoke LangGraph RAG pipeline with the EXACT original_query and input_mode
     try:
         from koinonia_assistant.rag.rag_engine import run_query
         res = run_query(
@@ -216,6 +223,8 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
             user_parish=user_parish,
             request_id=req_id,
             user_id=user_email,
+            input_mode=input_mode,
+            original_transcript=original_query if input_mode == "voice" else None,
         )
 
         if isinstance(res, str):

@@ -763,6 +763,8 @@ class GraphState(TypedDict):
     chart_data:        Optional[Dict[str, Any]]
     disambiguation:    Optional[Dict[str, Any]]
     suggested_questions: Optional[List[str]]
+    input_mode:        Optional[str]
+    original_transcript: Optional[str]
     analysis_metadata: Optional[Dict[str, Any]]
 
 # ─── Graph Nodes ──────────────────────────────────────────────────────────────
@@ -2148,7 +2150,9 @@ def database_lookup_node(state: GraphState) -> GraphState:
         person_res = resolve_member_and_family(
             question,
             user_parish=user_parish,
-            user_diocese=user_diocese
+            user_diocese=user_diocese,
+            input_mode=state.get("input_mode") or "chat",
+            original_transcript=state.get("original_transcript")
         )
         if person_res.get("status") == "exact":
             m = person_res.get("matched_member")
@@ -2169,28 +2173,57 @@ def database_lookup_node(state: GraphState) -> GraphState:
             }
         elif person_res.get("status") == "candidates":
             cands = person_res.get("candidates", [])
-            disambig_obj = {
-                "message": (
+            num_cands = len(cands)
+            c_en = "two" if num_cands == 2 else ("three" if num_cands == 3 else f"{num_cands}")
+            c_ta = "இரண்டு" if num_cands == 2 else ("மூன்று" if num_cands == 3 else f"{num_cands}")
+
+            if state.get("input_mode") == "voice":
+                disambig_msg = (
+                    f"{c_ta} பொருத்தமான பெயர்கள் கண்டறியப்பட்டுள்ளன. நீங்கள் குறிப்பிடும் நபரை தேர்ந்தெடுக்கவும்:"
+                    if is_ta
+                    else f"I found {c_en} closely matching names. Please select the person you mean."
+                )
+            else:
+                disambig_msg = (
                     "பின்வரும் பங்கு உறுப்பினர்களில் யாரைக் குறிப்பிடுகிறீர்கள்?"
                     if is_ta
                     else "Did you mean one of the following parishioners?"
-                ),
+                )
+
+            disambig_obj = {
+                "message": disambig_msg,
                 "options": cands[:3]
             }
             return {
                 **state,
                 "route": "handled",
-                "deterministic_reply": (
-                    "பல பொருத்தமான பதிவுகள் கண்டறியப்பட்டுள்ளன. விவரங்களைப் பார்க்க கீழே உள்ளவற்றில் ஒன்றைத் தேர்ந்தெடுக்கவும்:"
-                    if is_ta
-                    else "Multiple matching records found. Please select an option to view details:"
-                ),
+                "deterministic_reply": disambig_msg,
                 "generated_sql": "",
                 "sql_result": [],
                 "disambiguation": disambig_obj,
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                 "authorized_record_count": len(cands[:3]),
                 "suggested_questions": [c.get("prompt") for c in cands[:3]],
+            }
+        elif person_res.get("status") == "low_confidence":
+            low_msg = person_res.get("reply") or (
+                "நபரை உறுதியாக அடையாளம் காண முடியவில்லை. முழுப் பெயர் அல்லது குடும்ப அட்டை எண்ணைக் கூறவும்."
+                if is_ta
+                else "I couldn't identify the person confidently. Please say the full name or family card number."
+            )
+            return {
+                **state,
+                "route": "handled",
+                "deterministic_reply": low_msg,
+                "generated_sql": "",
+                "sql_result": [],
+                "disambiguation": None,
+                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
+                "authorized_record_count": 0,
+                "suggested_questions": [
+                    "List any 10 members in my parish",
+                    "List any 10 families in my parish"
+                ],
             }
         elif person_res.get("status") == "not_found":
             parish_label = f" in {user_parish}" if user_parish else ""
@@ -2502,18 +2535,37 @@ def resolve_follow_up_context(question: str, history: list = None) -> tuple[str,
 
     entity_ref = f"{person_name} (Card: {card_no})" if (person_name and card_no) else (person_name or f"Card: {card_no}")
 
-    is_list_members = any(w in q_clean for w in ["பட்டியல்", "பட்டியலிடு", "உறுப்பினர்", "members", "list", "who"])
-    is_details = any(w in q_clean for w in ["விவரம்", "விவரங்கள்", "details", "info"])
-    is_baptism = any(w in q_clean for w in ["திருமுழுக்கு", "ஞானஸ்நான", "baptism"])
+    is_list_members = any(w in q_clean.lower() for w in ["பட்டியல்", "பட்டியலிடு", "உறுப்பினர்", "members", "list", "who"])
+    is_details = any(w in q_clean.lower() for w in ["விவரம்", "விவரங்கள்", "details", "info"])
+    is_baptism = any(w in q_clean.lower() for w in ["திருமுழுக்கு", "ஞானஸ்நான", "baptism"])
+    is_address = any(w in q_clean.lower() for w in ["முகவரி", "address", "where", "location"])
+    is_sacraments = any(w in q_clean.lower() for w in ["sacrament", "sacraments", "சாக்ரமென்ட்"])
 
-    if is_baptism:
-        resolved_q = f"{entity_ref} குடும்பத்தினரின் திருமுழுக்குப் பதிவுகள்" if "குடும்ப" in q_clean or not is_list_members else f"{entity_ref} திருமுழுக்கு நிலை என்ன?"
-    elif is_list_members:
-        resolved_q = f"{entity_ref} குடும்ப உறுப்பினர்களை பட்டியல் இடு"
-    elif is_details:
-        resolved_q = f"{entity_ref} குடும்ப விவரங்கள்"
+    from koinonia_assistant.rag.tamil_utils import is_tamil
+    is_ta = is_tamil(q_clean)
+
+    if is_ta:
+        if is_baptism:
+            resolved_q = f"{entity_ref} குடும்பத்தினரின் திருமுழுக்குப் பதிவுகள்" if "குடும்ப" in q_clean or not is_list_members else f"{entity_ref} திருமுழுக்கு நிலை என்ன?"
+        elif is_list_members:
+            resolved_q = f"{entity_ref} குடும்ப உறுப்பினர்களை பட்டியல் இடு"
+        elif is_address:
+            resolved_q = f"{entity_ref} முகவரி என்ன?"
+        elif is_sacraments:
+            resolved_q = f"{entity_ref} அருட்சாதன விவரங்கள்"
+        else:
+            resolved_q = f"{entity_ref} குடும்ப விவரங்கள்"
     else:
-        resolved_q = f"{entity_ref} குடும்ப விவரங்கள்"
+        if is_baptism:
+            resolved_q = f"Show baptism records of {entity_ref}"
+        elif is_list_members:
+            resolved_q = f"Show all family members of {entity_ref}"
+        elif is_address:
+            resolved_q = f"What is {entity_ref}'s address?"
+        elif is_sacraments:
+            resolved_q = f"Show sacrament details for {entity_ref}"
+        else:
+            resolved_q = f"Show family details of {entity_ref}"
 
     inherited = {
         "card_no": card_no,
@@ -2532,10 +2584,13 @@ def run_query(
     user_diocese: str = None,
     request_id: str = None,
     user_id: str = None,
+    input_mode: str = "chat",
+    original_transcript: str = None,
 ) -> dict:
     """
     Unified Server-First Entrypoint:
     - Preserves `original_query` EXACTLY as entered (Sections 24–27, 48: NEVER converts Tamil to Tanglish).
+    - Preserves `original_transcript` for voice queries (Rule 2).
     - Executes `resolve_permissions` as Step 0 inside LangGraph BEFORE any database retrieval (Sections 50–76).
     """
     import uuid
@@ -2553,7 +2608,7 @@ def run_query(
         print(f"[FollowUpContext] Anaphoric query resolved -> '{effective_question}' (Inherited: {inherited_entity})")
 
     print("\n" + "=" * 76)
-    print(f"[BACKEND] REQUEST RECEIVED | request_id={req_id} | trace_id={trace_id} | lang={detected_lang}")
+    print(f"[BACKEND] REQUEST RECEIVED | request_id={req_id} | trace_id={trace_id} | lang={detected_lang} | input_mode={input_mode}")
     print(f"[BACKEND] Original Query (Immutable): '{original_question}' | Role: {user_role} | Parish: {user_parish}")
     print("=" * 76)
 
@@ -2580,6 +2635,8 @@ def run_query(
     initial_state: GraphState = {
         "question": effective_question,
         "original_query": original_question,
+        "input_mode": input_mode,
+        "original_transcript": original_transcript or (original_question if input_mode == "voice" else None),
         "detected_language": detected_lang,
         "normalized_query": pre_intent.get("normalized_query", ""),
         "intent_query": pre_intent.get("intent_query", pre_intent.get("intent", "")),
@@ -2729,5 +2786,7 @@ def run_query(
         "method": forecast_method,
         "processing_time": processing_time,
         "query_id": history_id,
+        "input_mode": final_state.get("input_mode", input_mode),
+        "original_transcript": final_state.get("original_transcript", original_transcript),
     }
 

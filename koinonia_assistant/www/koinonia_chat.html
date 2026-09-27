@@ -3747,7 +3747,7 @@
             return "🙏 I encountered a temporary issue while looking up the records for you. Please try rephrasing your question or ask again in a moment! 😊";
         }
 
-        function sendMessage(explicitText = null, explicitDisplayText = null) {
+        function sendMessage(explicitText = null, explicitDisplayText = null, inputMode = 'chat') {
             if (isGenerating) {
                 console.warn("A query is currently processing. Please wait.");
                 return;
@@ -3909,6 +3909,7 @@
             formData.append('history', JSON.stringify(payloadHistory));
             formData.append('reference_text', refToSend || "");
             formData.append('workspace_id', activeWs);
+            formData.append('input_mode', inputMode);
 
             const headers = {};
             const token = getCsrfToken();
@@ -5942,7 +5943,7 @@
             }
 
             // AUTOMATIC SEND: User should NOT press Send separately!
-            sendMessage(normalizedQuery);
+            sendMessage(normalizedQuery, null, 'voice');
         }
 
         function cancelPushToTalkRecording(reason = "") {

@@ -344,44 +344,80 @@ def build_candidate_prompt(query_text: str, person_name: str, cand_name: str, ca
     """
     Preserves the user's original query intent across candidate selection without ever exposing
     internal Member IDs or Family IDs. Returns (prompt_with_card, clean_display_text).
+    Supports English, Tamil, and Tanglish query contexts.
     """
     eff_scope = scope or determine_response_scope(query_text)
     clean_cand = re.sub(r'\s+', ' ', cand_name or '').strip()
     clean_card = (card_no or '').strip()
     card_suffix = f" (Card: {clean_card})" if clean_card else ""
 
-    if eff_scope == 'FAMILY_BAPTISM_RECORDS':
-        display_text = f"Show baptism records of {clean_cand}'s family"
-    elif eff_scope == 'FAMILY_COMMUNION_RECORDS':
-        display_text = f"Show First Holy Communion records of {clean_cand}'s family"
-    elif eff_scope == 'FAMILY_CONFIRMATION_RECORDS':
-        display_text = f"Show confirmation records of {clean_cand}'s family"
-    elif eff_scope == 'FAMILY_MARRIAGE_RECORDS':
-        display_text = f"Show marriage records of {clean_cand}'s family"
-    elif eff_scope == 'FAMILY_ALL_SACRAMENTS':
-        display_text = f"Show all sacrament records of {clean_cand}'s family"
-    elif eff_scope == 'FAMILY_MEMBER_COUNT':
-        display_text = f"How many people are in {clean_cand}'s family?"
-    elif eff_scope == 'FAMILY_DETAILS':
-        display_text = f"Show family details of {clean_cand}"
-    elif eff_scope == 'FAMILY_MEMBERS_ONLY':
-        display_text = f"Show all family members of {clean_cand}"
-    elif eff_scope == 'ALL_SACRAMENTS':
-        display_text = f"Show sacrament details for {clean_cand}"
-    elif eff_scope == 'BAPTISM_STATUS':
-        display_text = f"Show baptism status of {clean_cand}"
-    elif eff_scope == 'COMMUNION_STATUS':
-        display_text = f"Show communion status of {clean_cand}"
-    elif eff_scope == 'CONFIRMATION_STATUS':
-        display_text = f"Show confirmation status of {clean_cand}"
-    elif eff_scope == 'MARRIAGE_STATUS':
-        display_text = f"Show marriage status of {clean_cand}"
-    elif eff_scope == 'MEMBER_PHONE':
-        display_text = f"What is {clean_cand}'s phone number?"
-    elif eff_scope == 'MEMBER_ADDRESS':
-        display_text = f"What is {clean_cand}'s address?"
+    from koinonia_assistant.rag.tamil_utils import is_tamil
+    is_ta = is_tamil(query_text)
+
+    if is_ta:
+        if eff_scope == 'FAMILY_BAPTISM_RECORDS':
+            display_text = f"{clean_cand} குடும்பத்தினரின் திருமுழுக்குப் பதிவுகள்"
+        elif eff_scope == 'FAMILY_COMMUNION_RECORDS':
+            display_text = f"{clean_cand} குடும்பத்தினரின் முதல் நற்கருணைப் பதிவுகள்"
+        elif eff_scope == 'FAMILY_CONFIRMATION_RECORDS':
+            display_text = f"{clean_cand} குடும்பத்தினரின் உறுதிப்பூசுதல் பதிவுகள்"
+        elif eff_scope == 'FAMILY_MARRIAGE_RECORDS':
+            display_text = f"{clean_cand} குடும்பத்தினரின் திருமணப் பதிவுகள்"
+        elif eff_scope == 'FAMILY_ALL_SACRAMENTS':
+            display_text = f"{clean_cand} குடும்பத்தினரின் அனைத்து அருட்சாதனப் பதிவுகள்"
+        elif eff_scope == 'FAMILY_MEMBER_COUNT':
+            display_text = f"{clean_cand} குடும்பத்தில் எத்தனை பேர் உள்ளனர்?"
+        elif eff_scope in ('FAMILY_DETAILS', 'FAMILY_MEMBERS_ONLY'):
+            display_text = f"{clean_cand} குடும்ப விவரங்கள்"
+        elif eff_scope == 'BAPTISM_STATUS':
+            display_text = f"{clean_cand} திருமுழுக்கு நிலை என்ன?"
+        elif eff_scope == 'COMMUNION_STATUS':
+            display_text = f"{clean_cand} முதல் நற்கருணை பெற்றாரா?"
+        elif eff_scope == 'CONFIRMATION_STATUS':
+            display_text = f"{clean_cand} உறுதிப்பூசுதல் பெற்றாரா?"
+        elif eff_scope == 'MARRIAGE_STATUS':
+            display_text = f"{clean_cand} திருமண நிலை என்ன?"
+        elif eff_scope == 'ALL_SACRAMENTS':
+            display_text = f"{clean_cand} அருட்சாதன விவரங்கள்"
+        elif eff_scope == 'MEMBER_PHONE':
+            display_text = f"{clean_cand} தொடர்பு எண் என்ன?"
+        elif eff_scope == 'MEMBER_ADDRESS':
+            display_text = f"{clean_cand} முகவரி என்ன?"
+        else:
+            display_text = f"{clean_cand} குடும்ப விவரங்கள்"
     else:
-        display_text = f"Show family details of {clean_cand}"
+        if eff_scope == 'FAMILY_BAPTISM_RECORDS':
+            display_text = f"Show baptism records of {clean_cand}'s family"
+        elif eff_scope == 'FAMILY_COMMUNION_RECORDS':
+            display_text = f"Show First Holy Communion records of {clean_cand}'s family"
+        elif eff_scope == 'FAMILY_CONFIRMATION_RECORDS':
+            display_text = f"Show confirmation records of {clean_cand}'s family"
+        elif eff_scope == 'FAMILY_MARRIAGE_RECORDS':
+            display_text = f"Show marriage records of {clean_cand}'s family"
+        elif eff_scope == 'FAMILY_ALL_SACRAMENTS':
+            display_text = f"Show all sacrament records of {clean_cand}'s family"
+        elif eff_scope == 'FAMILY_MEMBER_COUNT':
+            display_text = f"How many people are in {clean_cand}'s family?"
+        elif eff_scope == 'FAMILY_DETAILS':
+            display_text = f"Show family details of {clean_cand}"
+        elif eff_scope == 'FAMILY_MEMBERS_ONLY':
+            display_text = f"Show all family members of {clean_cand}"
+        elif eff_scope == 'ALL_SACRAMENTS':
+            display_text = f"Show sacrament details for {clean_cand}"
+        elif eff_scope == 'BAPTISM_STATUS':
+            display_text = f"Show baptism status of {clean_cand}"
+        elif eff_scope == 'COMMUNION_STATUS':
+            display_text = f"Show communion status of {clean_cand}"
+        elif eff_scope == 'CONFIRMATION_STATUS':
+            display_text = f"Show confirmation status of {clean_cand}"
+        elif eff_scope == 'MARRIAGE_STATUS':
+            display_text = f"Show marriage status of {clean_cand}"
+        elif eff_scope == 'MEMBER_PHONE':
+            display_text = f"What is {clean_cand}'s phone number?"
+        elif eff_scope == 'MEMBER_ADDRESS':
+            display_text = f"What is {clean_cand}'s address?"
+        else:
+            display_text = f"Show family details of {clean_cand}"
 
     return f"{display_text}{card_suffix}", display_text
 
@@ -1035,13 +1071,16 @@ def resolve_member_and_family(
     query_text: str,
     user_parish: str = None,
     user_diocese: str = None,
-    user_vicariate: str = None
+    user_vicariate: str = None,
+    input_mode: str = "chat",
+    original_transcript: str = None
 ) -> dict:
     """
-    High-Precision 3-Level Member and Family Resolver:
-    LEVEL 1 — EXACT MATCH (Full name or exact base name)
-    LEVEL 2 — UNIQUE HIGH-CONFIDENCE MATCH (Score threshold + Score Gap rule)
-    LEVEL 3 — FUZZY AMBIGUOUS MATCH (Multiple close high-scoring candidates)
+    High-Precision Member and Family Resolver:
+    - CHAT MODE (input_mode == "chat"): Preserves existing top-candidate retrieval process untouched.
+    - VOICE MODE (input_mode == "voice"): Applies multi-signal competitor-aware voice name resolution
+      layer with token-aware matching (never compact/spaceless alone), scope enforcement, and
+      disambiguation cards without data leaks (Rules 1-20).
     """
     if not query_text or not query_text.strip():
         return {"status": "empty"}
@@ -1052,18 +1091,18 @@ def resolve_member_and_family(
     scope = intent_res.get("scope", "GENERAL_MEMBER")
 
     if not person_name:
-        return {"status": "not_found", "intent": intent, "response_scope": scope}
+        return {"status": "not_found", "intent": intent, "response_scope": scope, "input_mode": input_mode}
 
     # Reject if person_name is only generic words
     tokens = [w.lower().strip('.') for w in person_name.split()]
     if not tokens or all(w in RESERVED_GENERIC_WORDS or w.isdigit() for w in tokens):
-        return {"status": "not_found", "intent": intent, "response_scope": scope}
+        return {"status": "not_found", "intent": intent, "response_scope": scope, "input_mode": input_mode}
 
     norm_query = normalize_name(person_name)
     if len(norm_query) < 2:
-        return {"status": "not_found", "intent": intent, "response_scope": scope}
+        return {"status": "not_found", "intent": intent, "response_scope": scope, "input_mode": input_mode}
 
-    # 1. Build Pre-Search Jurisdiction Filter (Permission filtering BEFORE matching)
+    # 1. Build Pre-Search Jurisdiction Filter (Permission filtering BEFORE matching - Rule 5 & 15)
     where_clauses = []
     params = []
     
@@ -1109,10 +1148,10 @@ def resolve_member_and_family(
         members = frappe.db.sql(sql, tuple(params), as_dict=True)
     except Exception as e:
         print(f"[name_search] Error fetching members: {e}")
-        return {"status": "error", "error": str(e), "intent": intent, "response_scope": scope}
+        return {"status": "error", "error": str(e), "intent": intent, "response_scope": scope, "input_mode": input_mode}
 
     if not members:
-        return {"status": "not_found", "intent": intent, "response_scope": scope}
+        return {"status": "not_found", "intent": intent, "response_scope": scope, "input_mode": input_mode}
 
     # Check if user clicked [Select] on a candidate card with explicit (Card: YLG/...)
     explicit_card_m = re.search(r'\bCard:\s*([A-Z]{2,5}/\d{1,5})\b', query_text, re.IGNORECASE)
@@ -1131,7 +1170,7 @@ def resolve_member_and_family(
         norm_full = normalize_name(m.full_name)
         m_card = (m.family_register_number or '').strip().upper()
         if explicit_card:
-            if m_card == explicit_card and (norm_full == norm_query or norm_query in norm_full or norm_full in norm_query):
+            if m_card == explicit_card:
                 exact_matches.append(m)
         elif norm_full == norm_query:
             exact_matches.append(m)
@@ -1143,26 +1182,113 @@ def resolve_member_and_family(
     top_score, top_cat, top_m = all_scored[0] if all_scored else (0.0, "NONE", None)
     second_score, second_cat, second_m = all_scored[1] if len(all_scored) > 1 else (0.0, "NONE", None)
     score_gap = round(top_score - second_score, 1)
-
-    # TOP-CANDIDATE DIRECT RESOLUTION LOGIC:
-    # Directly proceed with the top candidate / matched details without showing candidate selection cards
     exact_match_count = len(exact_matches)
-    if exact_match_count >= 1:
-        decision = "EXACT_MATCH"
-        action = "DIRECT_RESULT"
-        selected_member = exact_matches[0]
-    elif top_score >= 68.0 and top_m is not None:
-        decision = "TOP_CANDIDATE_AUTO_SELECTED"
-        action = "DIRECT_RESULT"
-        selected_member = top_m
+
+    # =========================================================================
+    # DECISION LAYER: CHAT VS VOICE DIFFERENTIATION (Rule 1)
+    # =========================================================================
+    cands_pool = []
+    if explicit_card:
+        # Rule 6, 7, 10, 18: Exact Family Card / Member ID is authoritative
+        card_matches = [m for m in members if (m.family_register_number or '').strip().upper() == explicit_card]
+        if card_matches:
+            selected_member = card_matches[0]
+            decision = "EXACT_CARD_MATCH"
+            action = "DIRECT_RESULT"
+        else:
+            decision = "NO_MATCH"
+            action = "NO_MATCH"
+            selected_member = None
+    elif input_mode != "voice":
+        # =====================================================================
+        # RULE 1: DO NOT CHANGE THE EXISTING CHAT RETRIEVAL
+        # If input_mode = "chat", continue using the existing chat retrieval process
+        # =====================================================================
+        if exact_match_count >= 1:
+            decision = "EXACT_MATCH"
+            action = "DIRECT_RESULT"
+            selected_member = exact_matches[0]
+        elif top_score >= 68.0 and top_m is not None:
+            decision = "TOP_CANDIDATE_AUTO_SELECTED"
+            action = "DIRECT_RESULT"
+            selected_member = top_m
+        else:
+            decision = "NO_MATCH"
+            action = "NO_MATCH"
+            selected_member = None
     else:
-        decision = "NO_MATCH"
-        action = "NO_MATCH"
-        selected_member = None
+        # =====================================================================
+        # VOICE-BASED PERSON NAME RESOLUTION AND DISAMBIGUATION (Rules 1 - 20)
+        # =====================================================================
+        if not all_scored or top_score < 65.0:
+            # Rule 16-D: Low Confidence
+            decision = "LOW_CONFIDENCE"
+            action = "LOW_CONFIDENCE"
+            selected_member = None
+        else:
+            # Rule 4: NEVER USE COMPACT NAME ALONE (Token-aware vs compound matching)
+            # Rule 8 & 17: AMBIGUOUS MATCH & ANTI-WRONG-PERSON RULE
+            # Detect whether top candidate has close competitors in the authorized parish
+            competitors = []
+            top_norm = normalize_name(top_m.full_name)
+            top_spaceless = top_norm.replace(" ", "")
+            top_phon_spaceless = phonetic_normalize(top_spaceless)
+            q_tokens, q_base, q_inits = split_base_and_initials(norm_query)
+
+            for cand_score, cand_cat, cand_m in all_scored[1:]:
+                if cand_m.member_id == top_m.member_id:
+                    continue
+                if cand_score < 65.0:
+                    break
+
+                cand_norm = normalize_name(cand_m.full_name)
+                cand_spaceless = cand_norm.replace(" ", "")
+                cand_phon_spaceless = phonetic_normalize(cand_spaceless)
+
+                is_competitor = False
+
+                # Condition 1: Compound / Spaceless / Phonetic Base Conflict (Rule 4 & 8)
+                # "Antony Raj S" vs "Antonyraj S" both become "antonyrajs" after removing spaces.
+                # Token boundaries must be preserved: ['antony', 'raj'] vs ['antonyraj'].
+                # Compact space-free matching alone must NEVER make a silent decision!
+                if top_spaceless == cand_spaceless or top_phon_spaceless == cand_phon_spaceless:
+                    is_competitor = True
+
+                # Condition 2: Close scoring competitor (Rule 17: Candidate A=94, Candidate B=93)
+                elif cand_score >= 75.0 and (top_score - cand_score) <= 12.0:
+                    is_competitor = True
+
+                # Condition 3: Prefix token ambiguity (e.g. single-token query "Antony")
+                elif (top_cat == "PREFIX_TOKEN" or len(q_tokens) <= 1) and (top_score - cand_score) <= 5.0:
+                    is_competitor = True
+
+                if is_competitor:
+                    competitors.append((cand_score, cand_cat, cand_m))
+
+            if len(exact_matches) > 1 or competitors:
+                # Rule 8, 9, 16-C: AMBIGUOUS -> Return 2-3 suggestion cards without leaking private data
+                decision = "AMBIGUOUS"
+                action = "SHOW_CANDIDATES"
+                cands_pool = [top_m]
+                for c_score, c_cat, c_m in competitors:
+                    if c_m.member_id not in [x.member_id for x in cands_pool]:
+                        cands_pool.append(c_m)
+                    if len(cands_pool) >= 3:
+                        break
+            elif top_score >= 70.0 and top_m is not None:
+                # Rule 7 & 16-A/B: High confidence or medium confidence but unique
+                # One clearly matching candidate with no meaningful competitor -> Direct retrieval
+                decision = "CLEAR_UNIQUE_MATCH"
+                action = "DIRECT_RESULT"
+                selected_member = top_m
+            else:
+                decision = "LOW_CONFIDENCE"
+                action = "LOW_CONFIDENCE"
+                selected_member = None
 
     # Mandatory Debug Output
     print("=" * 60)
-    print(f"ORIGINAL QUERY: {query_text}")
+    print(f"ORIGINAL QUERY: {query_text} [input_mode={input_mode}]")
     print(f"EXTRACTED PERSON NAME: {person_name}")
     print(f"NORMALIZED QUERY: {norm_query}")
     print(f"TOP MATCH: {top_m.full_name if top_m else 'None'} (ID: {top_m.member_id if top_m else 'None'})")
@@ -1190,20 +1316,23 @@ def resolve_member_and_family(
             "match_decision": decision,
             "match_status": decision,
             "confirmation_required": False,
-            "top_score": top_score
+            "top_score": top_score,
+            "input_mode": input_mode
         }
 
     if action == "SHOW_CANDIDATES":
-        # TOP-CANDIDATE DISPLAY RULE: Display ONLY the TOP 1 BEST MATCH (never display 3, 5, or 10 fuzzy matches)
-        if exact_match_count > 1:
-            cand_Pool = [(100.0, "EXACT_FULL", exact_matches[0])]
+        if input_mode == "voice":
+            cand_list = cands_pool[:3]
+        elif exact_match_count > 1:
+            cand_list = [exact_matches[0]]
         else:
-            cand_Pool = all_scored[:1]
+            cand_list = [all_scored[0][2]] if all_scored else []
 
         top_candidates = []
-        for score, cat, m in cand_Pool:
+        for m in cand_list:
             card_str = m.family_register_number or m.family_id
             cand_prompt, cand_display = build_candidate_prompt(query_text, person_name, m.full_name, card_str, scope=scope)
+            m_score = next((s for s, c, cand in all_scored if cand.member_id == m.member_id), top_score)
             top_candidates.append({
                 "type": "member",
                 "member_id": m.member_id,
@@ -1217,20 +1346,46 @@ def resolve_member_and_family(
                 "parish_id": m.parish_id,
                 "prompt": cand_prompt,
                 "display_text": cand_display,
-                "similarity": round(score, 1)
+                "similarity": round(m_score, 1)
             })
+
+        c_count = len(top_candidates)
+        count_str_en = "two" if c_count == 2 else ("three" if c_count == 3 else f"{c_count}")
+        disambig_message = f"I found {count_str_en} closely matching names. Please select the person you mean."
 
         return {
             "status": "candidates",
             "candidates": top_candidates,
+            "disambiguation_message": disambig_message,
             "intent": intent,
             "response_scope": scope,
             "match_decision": decision,
-            "match_status": "FUZZY_MATCH",
-            "confirmation_required": True
+            "match_status": "AMBIGUOUS" if input_mode == "voice" else "FUZZY_MATCH",
+            "confirmation_required": True,
+            "input_mode": input_mode,
+            "top_score": top_score
         }
 
-    return {"status": "not_found", "intent": intent, "response_scope": scope, "match_decision": decision}
+    if action == "LOW_CONFIDENCE":
+        from koinonia_assistant.rag.tamil_utils import is_tamil
+        is_ta = is_tamil(query_text)
+        reply = (
+            "நபரை உறுதியாக அடையாளம் காண முடியவில்லை. முழுப் பெயர் அல்லது குடும்ப அட்டை எண்ணைக் கூறவும்."
+            if is_ta
+            else "I couldn't identify the person confidently. Please say the full name or family card number."
+        )
+        return {
+            "status": "low_confidence",
+            "reply": reply,
+            "intent": intent,
+            "response_scope": scope,
+            "match_decision": decision,
+            "match_status": "LOW_CONFIDENCE",
+            "input_mode": input_mode,
+            "top_score": top_score
+        }
+
+    return {"status": "not_found", "intent": intent, "response_scope": scope, "match_decision": decision, "input_mode": input_mode}
 
 def fetch_full_family_bundle(family_id: str, parish_id: str = None) -> dict:
     """
