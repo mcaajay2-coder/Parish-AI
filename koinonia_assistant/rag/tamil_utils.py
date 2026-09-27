@@ -457,6 +457,10 @@ MULTILINGUAL_NON_NAME_WORDS = {
     "last", "past", "previous", "next", "coming", "upcoming", "future", "year", "years", "each",
     "every", "yearly", "annual", "trend", "change", "changed", "forecast", "predict", "statistics",
     "chart", "graph", "plot", "visualize", "visualise", "compare", "comparison",
+    # Gender & demographic words (MUST NEVER be extracted as person names)
+    "women", "womens", "woman", "womans", "men", "mens", "man", "mans", "male", "males", "female", "females",
+    "boy", "boys", "girl", "girls", "gender", "anbiyam", "bcc", "stats", "ratio", "percentage", "breakdown",
+    "and", "or", "our", "their", "there",
     # Tanglish particles & verbs
     "oda", "ku", "kku", "la", "le", "il", "evlo", "evalo", "ethanai", "eththanai", "irukanga",
     "irukkanga", "ullargal", "irukku", "irukkum", "nadanthuchu", "nadanthathu", "aachu", "eppadi",
@@ -586,6 +590,14 @@ def extract_person_entity_from_multilingual_query(query_text: str) -> Dict[str, 
     """
     if not query_text:
         return {"original_name": None, "normalized_name": None, "transliterated_name": None}
+
+    # STATISTICAL / AGGREGATE QUERY GUARD: Never extract person entity from statistics questions
+    try:
+        from koinonia_assistant.rag.name_search import detect_statistical_query
+        if detect_statistical_query(query_text):
+            return {"original_name": None, "normalized_name": None, "transliterated_name": None}
+    except Exception:
+        pass
 
     q_no_cards = re.sub(r"\b[A-Z]{2,5}/\d{1,5}\b", "", query_text, flags=re.IGNORECASE)
     q_no_cards = re.sub(r"\s*\((?:Member\s*ID|Family\s*ID|Family|ID|Card)[:\s0-9A-Za-z,\s\-/]+\)", "", q_no_cards, flags=re.IGNORECASE)

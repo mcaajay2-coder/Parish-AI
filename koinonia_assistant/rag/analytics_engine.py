@@ -378,6 +378,56 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
         metrics.append("marriage")
         canonical_terms["MARRIAGE"] = "Marriage"
 
+    # 3.1 STATISTICAL & AGGREGATE PRE-ROUTING (Bypasses Person Name Extraction completely)
+    from koinonia_assistant.rag.name_search import detect_statistical_query
+    stats_dims = detect_statistical_query(q_clean)
+    if stats_dims:
+        s_ent = stats_dims["entity"]
+        s_int = stats_dims["intent"]
+        s_group = stats_dims.get("group_by")
+
+        # If year-wise sacrament query, route to HISTORICAL_ANALYSIS/analytics_node
+        if s_group == "YEAR" and s_ent in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE", "SACRAMENT"):
+            m_list = [s_ent.lower()] if s_ent != "SACRAMENT" else ["baptism"]
+            return {
+                "original_query": q_clean,
+                "detected_language": lang,
+                "canonical_terms": canonical_terms,
+                "sacrament": SACRAMENT_METRICS[m_list[0]]["code"],
+                "period": "LAST_10_YEARS",
+                "grouping": "YEAR",
+                "final_response_language": "ta" if lang == "ta" else "en",
+                "normalized_query": f"INTENT=HISTORICAL_ANALYSIS | METRIC={m_list[0]} | PERIOD=LAST_10_YEARS",
+                "intent_query": "HISTORICAL_ANALYSIS",
+                "entity_query": f"METRIC={m_list[0]}",
+                "intent": "HISTORICAL_ANALYSIS",
+                "speed_tier": "ANALYTICAL",
+                "metrics": m_list,
+                "years_back": 10,
+                "forecast_horizon": 0,
+                "person_name": None,
+                "statistical_dimensions": stats_dims,
+            }
+
+        return {
+            "original_query": q_clean,
+            "detected_language": lang,
+            "canonical_terms": canonical_terms,
+            "sacrament": None,
+            "period": None,
+            "grouping": s_group,
+            "final_response_language": "ta" if lang == "ta" else "en",
+            "normalized_query": f"INTENT={s_int} | METRIC={stats_dims['metric']} | ENTITY={s_ent} | GROUP_BY={s_group} | GENDER={stats_dims.get('gender')}",
+            "intent_query": s_int,
+            "entity_query": s_ent,
+            "intent": s_int,
+            "scope": s_int,
+            "person_name": None,
+            "speed_tier": "FAST",
+            "metrics": [s_ent.lower()] if s_ent in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE") else [],
+            "statistical_dimensions": stats_dims,
+        }
+
     years_back = 10
     m_past = re.search(r"\b(?:last|past|previous|over\s+the\s+last|for\s+the\s+last)\s+(\d+)\s+years?\b", q_low)
     if m_past:

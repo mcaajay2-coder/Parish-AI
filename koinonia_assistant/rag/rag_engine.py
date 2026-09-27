@@ -886,7 +886,7 @@ def router_node(state: GraphState) -> GraphState:
             "route": "analytics_node",
         }
 
-    if c_intent in ("LIST", "COUNT", "MEMBER_SEARCH", "FAMILY_SEARCH", "SACRAMENT_SEARCH"):
+    if c_intent in ("LIST", "COUNT", "MEMBER_SEARCH", "FAMILY_SEARCH", "SACRAMENT_SEARCH", "MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS"):
         return {
             **common_state,
             "route": "database_lookup_node",
@@ -1910,6 +1910,36 @@ def database_lookup_node(state: GraphState) -> GraphState:
 
     print(f"[LANGGRAPH] DATABASE NODE | request_id={req_id} | intent={c_intent} | scope_type={scope_type} | scope_name={scope_name}")
 
+    # 0. Dedicated Statistical & Aggregation Execution (STATISTICS QUESTIONS MUST BYPASS PERSON RESOLUTION)
+    stats_dims = intent_info.get("statistical_dimensions")
+    if not stats_dims:
+        from koinonia_assistant.rag.name_search import detect_statistical_query
+        stats_dims = detect_statistical_query(question)
+
+    if stats_dims or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS"):
+        ensure_frappe_connected()
+        from koinonia_assistant.rag.name_search import execute_parish_statistics
+        dims = stats_dims or {
+            "is_statistical": True,
+            "intent": c_intent,
+            "entity": "MEMBER" if "MEMBER" in c_intent else ("FAMILY" if "FAMILY" in c_intent else "SACRAMENT"),
+            "metric": "COUNT",
+            "group_by": None,
+            "scope": "AUTHORIZED_PARISH",
+            "person_name": None
+        }
+        res = execute_parish_statistics(dims, user_parish=user_parish, user_diocese=user_diocese, auth_ctx=auth_ctx, language="ta" if is_ta else "en")
+        return {
+            **state,
+            "route": "handled",
+            "deterministic_reply": res["reply"],
+            "generated_sql": res.get("generated_sql", ""),
+            "sql_result": res.get("data", []),
+            "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
+            "authorized_record_count": res.get("record_count", 1),
+            "suggested_questions": res.get("suggested_questions", []),
+        }
+
     # 1. Qualified Member Sacrament List (e.g. "List any 10 members who got 3 Sacrements")
     if c_intent == "LIST" and intent_info.get("sub_intent") == "QUALIFIED_MEMBER_SACRAMENT_LIST":
         ensure_frappe_connected()
@@ -2145,7 +2175,10 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 }
 
     # 3-Level Member / Family / Sacrament Resolution (Supports both English & Tamil names via person_name entity)
-    person_name = intent_info.get("person_name") or extract_person_name_from_query(question)
+    # Strictly bypassed for statistical/aggregate queries
+    person_name = None
+    if not (intent_info.get("is_statistical") or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS", "COUNT", "HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS")):
+        person_name = intent_info.get("person_name") or extract_person_name_from_query(question)
     if person_name:
         person_res = resolve_member_and_family(
             question,

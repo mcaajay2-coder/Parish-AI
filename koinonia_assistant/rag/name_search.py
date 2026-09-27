@@ -422,10 +422,171 @@ def build_candidate_prompt(query_text: str, person_name: str, cand_name: str, ca
     return f"{display_text}{card_suffix}", display_text
 
 
+def detect_statistical_query(query_text: str) -> Optional[dict]:
+    """
+    STATISTICS QUESTIONS MUST BYPASS PERSON RESOLUTION:
+    Determines whether a query is asking for an aggregate/statistical result
+    (e.g., gender counts, member totals, family totals, BCC distribution, annual sacrament counts).
+    Returns structured statistical dimensions with person_name = None, or None if not an aggregate query.
+    """
+    if not query_text:
+        return None
+    q = query_text.lower().strip()
+    q_clean = re.sub(r'[\?!]+$', '', q).strip()
+
+    # Guard: Individual person family count query like "Antony Selvan's family" or "in Antony Selvan's family"
+    m_person_fam = re.search(r"\b(?:of|for|in|about)\s+([A-Za-z\s]+?)(?:'s|’s)\s+(?:family\s+members?|family|household)\b", q_clean)
+    if m_person_fam:
+        name_seg = m_person_fam.group(1).strip().lower()
+        if name_seg not in ('women', 'men', 'woman', 'man', 'our', 'the', 'my'):
+            return None
+
+    # Guard: Tamil individual person family query e.g. "அந்தோணி செல்வன் குடும்பத்தில் எத்தனை பேர்"
+    if 'குடும்பத்தில்' in q_clean or 'குடும்பத்தின்' in q_clean or 'குடும்பம்' in q_clean:
+        words = q_clean.split()
+        if len(words) >= 2:
+            first_w = words[0]
+            if first_w not in ('பங்கில்', 'எங்கள்', 'நமது', 'மொத்த', 'எத்தனை', 'இந்த'):
+                m_p = re.search(r'^\s*([^\s]+(?:\s+[^\s]+)?)\s+(?:குடும்பத்தில்|குடும்பத்தின்|குடும்பம்)', q_clean)
+                if m_p:
+                    cand = m_p.group(1)
+                    if cand not in ('பங்கு', 'பங்கில்', 'மொத்த', 'எத்தனை', 'அனைத்து'):
+                        if any(k in q_clean for k in ['எத்தனை பேர்', 'உறுப்பினர்கள் யார்', 'விவரம்']):
+                            return None
+
+    # 1. Detect Statistical / Aggregate intent keywords
+    has_count_kw = bool(re.search(
+        r'\b(?:how\s+many|number\s+of|count\s+of|count|total\s+number|total\s+count|total|how\s+much|breakdown|distribution|ratio|percentage|statistics|stats|summary)\b',
+        q_clean
+    ) or any(k in q_clean for k in ['எத்தனை', 'மொத்தம்', 'எண்ணிக்கை', 'புள்ளிவிவரம்', 'விகிதம்', 'பகிர்வு', 'கூட்டுத்தொகை', 'வாரியாக']))
+
+    has_year_wise = bool(re.search(r'\b(?:year[\s\-]*wise|by\s+year|yearly|each\s+year|annual|annually)\b', q_clean) or 'ஆண்டு வாரியாக' in q_clean)
+
+    # 2. Detect Gender dimension
+    has_women = bool(re.search(r"\b(?:women|woman|female|females|girls|girl|women's|womens)\b", q_clean) or any(k in q_clean for k in ['பெண்கள்', 'பெண்', 'சிறுமிகள்']))
+    has_men = bool(re.search(r"\b(?:men|man|male|males|boys|boy|men's|mens)\b", q_clean) or any(k in q_clean for k in ['ஆண்கள்', 'ஆண்', 'சிறுவர்கள்']))
+    has_gender_wise = bool(re.search(r'\b(?:gender[\s\-]*wise|by\s+gender|gender\s+count|gender\s+breakdown|gender)\b', q_clean) or 'பாலின வாரியாக' in q_clean or 'பாலினம்' in q_clean)
+
+    # 3. Detect BCC / Anbiyam dimension
+    has_bcc_wise = bool(re.search(r'\b(?:in\s+each\s+bcc|in\s+each\s+anbiyam|each\s+bcc|each\s+anbiyam|bcc[\s\-]*wise|anbiyam[\s\-]*wise|per\s+bcc|per\s+anbiyam|by\s+bcc|by\s+anbiyam|every\s+bcc|every\s+anbiyam)\b', q_clean) or any(k in q_clean for k in ['அன்பிய வாரியாக', 'ஒவ்வொரு அன்பியத்திலும்', 'அன்பியம் வாரியாக']))
+    anbiyam_filter = None
+    if not has_bcc_wise:
+        m_anb = re.search(r"\b(?:in|at|of|for)\s+([A-Za-z0-9\s\.\'\"]+?)\s+(?:anbiyam|bcc)\b", q_clean)
+        if m_anb:
+            cand = m_anb.group(1).strip()
+            cand_clean = re.sub(r'^(?:the|a|an)\s+', '', cand, flags=re.IGNORECASE).strip()
+            if cand_clean and cand_clean.lower() not in ('each', 'every', 'all', 'our', 'this'):
+                anbiyam_filter = cand_clean
+        else:
+            m_ta_anb = re.search(r'([\u0B80-\u0BFF\s]+?)\s+(?:அன்பியத்தில்|அன்பியத்தின்|அன்பியம்)', q_clean)
+            if m_ta_anb:
+                cand_ta = m_ta_anb.group(1).strip()
+                cand_ta_clean = re.sub(r'^(?:ஒவ்வொரு|அனைத்து|எங்கள்|நமது)\s+', '', cand_ta).strip()
+                if cand_ta_clean:
+                    anbiyam_filter = cand_ta_clean
+
+    # 4. Detect Sacrament dimension
+    has_baptism = bool(re.search(r'\b(?:baptism|baptisms|baptised|baptized)\b', q_clean) or any(k in q_clean for k in ['திருமுழுக்கு', 'ஞானஸ்நானம்']))
+    has_communion = bool(re.search(r'\b(?:communion|first\s+holy\s+communion|fhc)\b', q_clean) or any(k in q_clean for k in ['முதல் நற்கருணை', 'நற்கருணை', 'புதுநன்மை']))
+    has_confirmation = bool(re.search(r'\b(?:confirmation|confirmations)\b', q_clean) or any(k in q_clean for k in ['உறுதிப்பூசுதல்', 'உறுதிபூசுதல்']))
+    has_marriage = bool(re.search(r'\b(?:marriage|marriages|wedding|weddings)\b', q_clean) or any(k in q_clean for k in ['திருமணம்', 'விவாகம்']))
+    has_sacrament = has_baptism or has_communion or has_confirmation or has_marriage or bool(re.search(r'\b(?:sacraments?|sacrements?)\b', q_clean) or 'அருட்சாதன' in q_clean or 'திருவருட்சாதன' in q_clean)
+
+    # Detect Year filter
+    m_yr = re.search(r'\b(19\d\d|20\d\d)\b', q_clean)
+    year_filter = int(m_yr.group(1)) if m_yr else None
+
+    # 5. Detect Family entity
+    has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை']))
+
+    # 6. Detect Member entity
+    has_member = bool(re.search(r'\b(?:members|parishioners|people|persons|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்']))
+
+    # NOW EVALUATE:
+    # A. Gender Statistics
+    if (has_count_kw or has_gender_wise) and (has_women or has_men or has_gender_wise):
+        if (has_women and has_men) or has_gender_wise:
+            group_by = 'GENDER'
+            genders = ['FEMALE', 'MALE']
+        elif has_women:
+            group_by = None
+            genders = ['FEMALE']
+        else:
+            group_by = None
+            genders = ['MALE']
+        return {
+            'is_statistical': True,
+            'intent': 'MEMBER_STATISTICS',
+            'metric': 'COUNT',
+            'entity': 'MEMBER',
+            'group_by': group_by,
+            'gender': genders,
+            'anbiyam': anbiyam_filter,
+            'scope': 'AUTHORIZED_PARISH',
+            'person_name': None
+        }
+
+    # B. BCC / Anbiyam Statistics
+    if has_bcc_wise or (has_count_kw and anbiyam_filter):
+        entity = 'FAMILY' if has_family and not has_member else 'MEMBER'
+        group_by = 'BCC' if has_bcc_wise else None
+        return {
+            'is_statistical': True,
+            'intent': 'MEMBER_STATISTICS' if entity == 'MEMBER' else 'FAMILY_STATISTICS',
+            'metric': 'COUNT',
+            'entity': entity,
+            'group_by': group_by,
+            'anbiyam': anbiyam_filter,
+            'scope': 'AUTHORIZED_PARISH',
+            'person_name': None
+        }
+
+    # C. Sacrament Statistics
+    if has_sacrament and (has_count_kw or has_year_wise or year_filter):
+        sac = 'BAPTISM' if has_baptism else ('COMMUNION' if has_communion else ('CONFIRMATION' if has_confirmation else ('MARRIAGE' if has_marriage else 'SACRAMENT')))
+        return {
+            'is_statistical': True,
+            'intent': 'SACRAMENT_STATISTICS',
+            'metric': 'COUNT',
+            'entity': sac,
+            'group_by': 'YEAR' if has_year_wise else None,
+            'year': year_filter,
+            'scope': 'AUTHORIZED_PARISH',
+            'person_name': None
+        }
+
+    # D. Parish Family Count
+    if (has_count_kw and has_family) or q_clean in ['total families', 'family count', 'number of families']:
+        return {
+            'is_statistical': True,
+            'intent': 'FAMILY_STATISTICS',
+            'metric': 'COUNT',
+            'entity': 'FAMILY',
+            'group_by': None,
+            'scope': 'AUTHORIZED_PARISH',
+            'person_name': None
+        }
+
+    # E. Parish Member Count
+    if (has_count_kw and (has_member or 'in our parish' in q_clean or 'in the parish' in q_clean or 'in this parish' in q_clean)) or q_clean in ['total members', 'member count', 'number of members', 'total registered members']:
+        return {
+            'is_statistical': True,
+            'intent': 'MEMBER_STATISTICS',
+            'metric': 'COUNT',
+            'entity': 'MEMBER',
+            'group_by': None,
+            'scope': 'AUTHORIZED_PARISH',
+            'person_name': None
+        }
+
+    return None
+
+
 def classify_query_intent(query_text: str) -> dict:
     """
     Classifies query intent and extracts person name & response scope:
     - 'COUNT_MEMBERS' / 'COUNT_FAMILIES'
+    - 'MEMBER_STATISTICS' / 'FAMILY_STATISTICS' / 'SACRAMENT_STATISTICS'
     - 'LIST_MEMBERS' / 'LIST_FAMILIES'
     - Family + Sacrament Scopes: 'FAMILY_BAPTISM_RECORDS', 'FAMILY_COMMUNION_RECORDS',
       'FAMILY_CONFIRMATION_RECORDS', 'FAMILY_MARRIAGE_RECORDS', 'FAMILY_DEATH_RECORDS',
@@ -437,6 +598,22 @@ def classify_query_intent(query_text: str) -> dict:
     prep = preprocess_user_query(query_text)
     q_clean = (prep.get("corrected_query") or query_text).strip()
     q_low = q_clean.lower()
+
+    # =========================================================================
+    # RULE: STATISTICS QUESTIONS MUST BYPASS PERSON RESOLUTION
+    # Before invoking any person/member name resolver, determine whether the
+    # query is asking for an aggregate/statistical result.
+    # If statistical: person_name is strictly None, and resolution is bypassed.
+    # =========================================================================
+    stats_dims = detect_statistical_query(q_clean)
+    if stats_dims:
+        return {
+            "intent": stats_dims["intent"],
+            "scope": stats_dims["intent"],
+            "person_name": None,
+            "is_statistical": True,
+            "statistical_dimensions": stats_dims
+        }
 
     # Determine Scope first so FAMILY_MEMBER_COUNT / FAMILY_SACRAMENT_RECORDS with a person name are never hijacked
     clean_no_id = re.sub(r'\s*\((?:Member\s*ID|Family\s*ID|Family\s*Card|Family|ID|Card)[:\s0-9A-Za-z,\s\-/]+\)', '', q_clean).strip()
@@ -919,6 +1096,275 @@ def handle_count_families(
         ],
         "query_id": -1
     }
+
+
+def execute_parish_statistics(
+    stats_dims: dict,
+    user_parish: str = None,
+    user_diocese: str = None,
+    auth_ctx: dict = None,
+    language: str = "en"
+) -> dict:
+    """
+    Executes parish aggregate/statistical queries directly without invoking person name resolution.
+    Handles:
+    - Gender-wise member statistics (Male vs Female counts, percentages, table)
+    - Single gender queries (e.g. men count, women count)
+    - BCC / Anbiyam distribution and member counts
+    - Specific Anbiyam gender filtering (e.g. "How many men are there in Arockiya Annai Anbiyam?")
+    - Parish member and family totals
+    - Sacrament event totals (e.g. baptisms in 2024)
+    """
+    import frappe
+    if not frappe.db:
+        frappe.connect()
+
+    is_ta = language == "ta"
+    scope_name = user_parish or user_diocese or "your authorized parish"
+    entity = stats_dims.get("entity", "MEMBER")
+    group_by = stats_dims.get("group_by")
+    genders = stats_dims.get("gender")
+    anbiyam = stats_dims.get("anbiyam")
+    year = stats_dims.get("year")
+
+    # Base WHERE clauses strictly scoped to authorized parish
+    where_m = []
+    params_m = []
+    where_f = []
+    params_f = []
+
+    if user_parish:
+        where_m.append("(m.parish_id = %s OR m.parish_id LIKE %s)")
+        params_m.extend([user_parish, f"%{user_parish}%"])
+        where_f.append("(f.parish_id = %s OR f.parish_id LIKE %s)")
+        params_f.extend([user_parish, f"%{user_parish}%"])
+    elif user_diocese and user_diocese != "All Dioceses":
+        where_m.append("m.diocese_id = %s")
+        params_m.append(user_diocese)
+        where_f.append("f.diocese_id = %s")
+        params_f.append(user_diocese)
+
+    # 1. Gender Statistics (group_by == "GENDER")
+    if entity == "MEMBER" and group_by == "GENDER":
+        where_clauses = list(where_m)
+        params = list(params_m)
+        if anbiyam:
+            where_clauses.append("f.parish_bcc_id LIKE %s")
+            params.append(f"%{anbiyam}%")
+        base_w = " AND ".join(where_clauses) if where_clauses else "1=1"
+        sql = f"""
+            SELECT 
+                CASE 
+                    WHEN LOWER(m.gender) IN ('female', 'woman', 'women', 'girl') THEN 'Female'
+                    WHEN LOWER(m.gender) IN ('male', 'man', 'men', 'boy') THEN 'Male'
+                    ELSE 'Other/Unspecified'
+                END AS `Gender`,
+                COUNT(*) AS `Count`
+            FROM `tabMember` m
+            LEFT JOIN `tabFamily` f ON m.family_id = f.name
+            WHERE {base_w}
+            GROUP BY `Gender`
+            ORDER BY `Count` DESC
+        """
+        rows = frappe.db.sql(sql, tuple(params), as_dict=True)
+        total_m = sum(r["Count"] for r in rows)
+        f_count = next((r["Count"] for r in rows if r["Gender"] == "Female"), 0)
+        m_count = next((r["Count"] for r in rows if r["Gender"] == "Male"), 0)
+
+        anb_label = f" in **{anbiyam}**" if anbiyam else ""
+        anb_label_ta = f" (**{anbiyam}**)" if anbiyam else ""
+
+        if is_ta:
+            lines = [
+                f"### 📊 {scope_name}{anb_label_ta} — பாலின வாரியான உறுப்பினர் புள்ளிவிவரம்\n",
+                "| பாலினம் | எண்ணிக்கை | சதவீதம் |",
+                "| :--- | :--- | :--- |",
+                f"| **பெண்கள்** | {f_count:,} | {(f_count / total_m * 100):.1f}% |" if total_m else "| **பெண்கள்** | 0 | 0.0% |",
+                f"| **ஆண்கள்** | {m_count:,} | {(m_count / total_m * 100):.1f}% |" if total_m else "| **ஆண்கள்** | 0 | 0.0% |",
+                f"| **மொத்த உறுப்பினர்கள்** | **{total_m:,}** | **100.0%** |\n",
+                f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{f_count} பெண்களும்** மற்றும் **{m_count} ஆண்களும்** பதிவு செய்யப்பட்டுள்ளனர் (மொத்தம்: **{total_m} உறுப்பினர்கள்**)."
+            ]
+        else:
+            lines = [
+                f"### 📊 {scope_name}{anb_label} — Gender-wise Member Statistics\n",
+                "| Gender | Count | Percentage |",
+                "| :--- | :--- | :--- |",
+                f"| **Female (Women)** | {f_count:,} | {(f_count / total_m * 100):.1f}% |" if total_m else "| **Female (Women)** | 0 | 0.0% |",
+                f"| **Male (Men)** | {m_count:,} | {(m_count / total_m * 100):.1f}% |" if total_m else "| **Male (Men)** | 0 | 0.0% |",
+                f"| **Total Members** | **{total_m:,}** | **100.0%** |\n",
+                f"In **{scope_name}**{anb_label}, there are currently **{f_count} women** and **{m_count} men** registered (Total: **{total_m} members**)."
+            ]
+        return {
+            "reply": "\n".join(lines),
+            "generated_sql": sql,
+            "data": rows,
+            "record_count": total_m,
+            "suggested_questions": [
+                f"What is the total number of families in {scope_name}?",
+                "How many members are in each BCC?",
+                f"How many baptisms happened in 2024?"
+            ]
+        }
+
+    # 2. Single Gender Query (e.g. "How many men are there in Arockiya Annai Anbiyam?", "How many women in our parish?")
+    if entity == "MEMBER" and genders and len(genders) == 1:
+        target_g = genders[0].capitalize()
+        g_val = 'male' if target_g == 'Male' else 'female'
+        g_display = 'men' if target_g == 'Male' else 'women'
+        g_display_ta = 'ஆண்கள்' if target_g == 'Male' else 'பெண்கள்'
+
+        where_clauses = list(where_m)
+        params = list(params_m)
+        where_clauses.append("LOWER(m.gender) = %s")
+        params.append(g_val)
+        if anbiyam:
+            where_clauses.append("f.parish_bcc_id LIKE %s")
+            params.append(f"%{anbiyam}%")
+        base_w = " AND ".join(where_clauses) if where_clauses else "1=1"
+        sql = f"""
+            SELECT COUNT(m.name) AS count
+            FROM `tabMember` m
+            LEFT JOIN `tabFamily` f ON m.family_id = f.name
+            WHERE {base_w}
+        """
+        cnt = frappe.db.sql(sql, tuple(params))[0][0]
+        actual_anbiyam = anbiyam
+        if anbiyam:
+            try:
+                db_bcc = frappe.db.sql(
+                    "SELECT DISTINCT parish_bcc_id FROM `tabFamily` WHERE parish_bcc_id LIKE %s AND parish_bcc_id != '' LIMIT 1",
+                    (f"%{anbiyam}%",),
+                    as_dict=True
+                )
+                if db_bcc and db_bcc[0].get("parish_bcc_id"):
+                    actual_anbiyam = db_bcc[0]["parish_bcc_id"]
+                elif not actual_anbiyam.lower().endswith("anbiyam") and not actual_anbiyam.lower().endswith("bcc"):
+                    actual_anbiyam = f"{actual_anbiyam.title()} Anbiyam"
+            except Exception:
+                actual_anbiyam = anbiyam.title() if anbiyam else ""
+
+        anb_label = f" in **{actual_anbiyam}**" if actual_anbiyam else ""
+        anb_label_ta = f", **{actual_anbiyam}** அன்பியத்தில்" if actual_anbiyam else ""
+        if is_ta:
+            reply = f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{cnt} {g_display_ta}** பதிவு செய்யப்பட்டுள்ளனர்."
+        else:
+            reply = f"There are currently **{cnt} {g_display}** registered{anb_label} in **{scope_name}**."
+        return {
+            "reply": reply,
+            "generated_sql": sql,
+            "data": [{"Category": f"{target_g} ({scope_name})", "Count": cnt}],
+            "record_count": cnt,
+            "suggested_questions": [
+                "Give the gender-wise member count",
+                "How many members are in each BCC?",
+                "What is the total number of families?"
+            ]
+        }
+
+    # 3. BCC / Anbiyam-wise Distribution (group_by == "BCC")
+    if group_by == "BCC":
+        base_w = " AND ".join(where_f) if where_f else "1=1"
+        sql = f"""
+            SELECT 
+                COALESCE(NULLIF(f.parish_bcc_id, ''), 'Unassigned') AS `anbiyam`,
+                COUNT(m.name) AS `member_count`,
+                COUNT(DISTINCT f.name) AS `family_count`
+            FROM `tabFamily` f
+            LEFT JOIN `tabMember` m ON m.family_id = f.name
+            WHERE {base_w}
+            GROUP BY f.parish_bcc_id
+            ORDER BY `member_count` DESC
+        """
+        rows = frappe.db.sql(sql, tuple(params_f), as_dict=True)
+        tot_members = sum(r["member_count"] for r in rows)
+        tot_families = sum(r["family_count"] for r in rows)
+
+        if is_ta:
+            lines = [
+                f"### 📊 {scope_name} — அன்பிய வாரியான உறுப்பினர்கள் மற்றும் குடும்பங்கள் விவரம்\n",
+                "| # | அன்பியம் (BCC) | உறுப்பினர்கள் | குடும்பங்கள் |",
+                "| :--- | :--- | :--- | :--- |"
+            ]
+            for idx, r in enumerate(rows, 1):
+                lines.append(f"| {idx} | **{r['anbiyam']}** | {r['member_count']} | {r['family_count']} |")
+            lines.append(f"| | **மொத்தம்** | **{tot_members}** | **{tot_families}** |\n")
+            lines.append(f"**{scope_name}** பங்கில் உள்ள அன்பியங்கள் வாரியான விவரம் மேலே அட்டவணையில் கொடுக்கப்பட்டுள்ளது.")
+        else:
+            lines = [
+                f"### 📊 {scope_name} — BCC / Anbiyam-wise Member & Family Distribution\n",
+                "| # | BCC / Anbiyam | Members | Families |",
+                "| :--- | :--- | :--- | :--- |"
+            ]
+            for idx, r in enumerate(rows, 1):
+                lines.append(f"| {idx} | **{r['anbiyam']}** | {r['member_count']} | {r['family_count']} |")
+            lines.append(f"| | **Total** | **{tot_members}** | **{tot_families}** |\n")
+            lines.append(f"Here is the BCC/Anbiyam-wise member and family distribution for **{scope_name}**.")
+
+        return {
+            "reply": "\n".join(lines),
+            "generated_sql": sql,
+            "data": rows,
+            "record_count": tot_members,
+            "suggested_questions": [
+                "Give the gender-wise member count",
+                "How many members are in our parish?",
+                "What is the total number of families?"
+            ]
+        }
+
+    # 4. Total Families
+    if entity == "FAMILY" and not group_by and not anbiyam:
+        return handle_count_families(user_parish=user_parish, user_diocese=user_diocese)
+
+    # 5. Total Members
+    if entity == "MEMBER" and not group_by and not anbiyam:
+        return handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
+
+    # 6. Sacrament Counts (e.g. Baptisms in 2024)
+    if entity in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE", "SACRAMENT"):
+        from koinonia_assistant.rag.analytics_engine import SACRAMENT_METRICS
+        m_key = entity.lower()
+        meta = SACRAMENT_METRICS.get(m_key, SACRAMENT_METRICS["baptism"])
+        tbl = meta["table"]
+        d_col = meta["date_col"]
+        p_cols = meta["parish_cols"]
+        label = meta["label"]
+        label_ta = meta["ta_label"]
+
+        where_c = ["1=1"]
+        params = []
+        if year:
+            where_c.append(f"YEAR(`{d_col}`) = %s")
+            params.append(year)
+        if user_parish:
+            p_or = " OR ".join([f"`{c}` = %s OR `{c}` LIKE %s" for c in p_cols])
+            where_c.append(f"({p_or})")
+            for _ in p_cols:
+                params.extend([user_parish, f"%{user_parish}%"])
+
+        sql = f"SELECT COUNT(*) AS total_count FROM `{tbl}` WHERE {' AND '.join(where_c)}"
+        cnt = frappe.db.sql(sql, tuple(params))[0][0]
+        yr_str = f" in **{year}**" if year else ""
+        yr_str_ta = f" **{year}**-ல்" if year else ""
+        if is_ta:
+            reply = f"**{scope_name}** பங்கில்{yr_str_ta} மொத்தம் **{cnt:,}** {label_ta} பதிவுகள் உள்ளன."
+        else:
+            reply = f"In **{scope_name}**{yr_str}, there are **{cnt:,}** {label.lower()} record(s) registered."
+        return {
+            "reply": reply,
+            "generated_sql": sql,
+            "data": [{"Category": f"{label} ({scope_name})", "Year": year or "All", "Count": cnt}],
+            "record_count": cnt,
+            "suggested_questions": [
+                f"Show {label.lower()} counts year-wise",
+                "How many members are in our parish?",
+                "What is the total number of families?"
+            ]
+        }
+
+    # Fallback to general member count
+    return handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
+
 
 PHONETIC_REPLACEMENTS = [
     (r'\bantoney\b', 'antony'),
