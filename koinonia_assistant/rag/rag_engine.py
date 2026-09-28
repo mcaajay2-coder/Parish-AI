@@ -767,6 +767,30 @@ class GraphState(TypedDict):
     original_transcript: Optional[str]
     analysis_metadata: Optional[Dict[str, Any]]
 
+    # Section 32: Retrieval Fallback State
+    retrieval_status: Optional[str]
+    retrieval_failed: Optional[bool]
+    sql_fallback_required: Optional[bool]
+    sql_fallback_attempted: Optional[bool]
+    sql_fallback_result: Optional[Any]
+    
+    # Query Plan & Validation State
+    query_plan: Optional[Dict[str, Any]]
+    query_plan_valid: Optional[bool]
+    query_plan_validation_error: Optional[str]
+    sql_valid: Optional[bool]
+    database_result: Optional[Any]
+
+    # Section 11: SQL Self-Correction & Retry State
+    sql_retry_count: Optional[int]
+    sql_max_retries: Optional[int]
+    sql_retry_reason: Optional[str]
+    sql_previous_query: Optional[str]
+    sql_error: Optional[str]
+    sql_error_type: Optional[str]
+    sql_correction_attempt: Optional[bool]
+    sql_retry_exhausted: Optional[bool]
+
 # ─── Graph Nodes ──────────────────────────────────────────────────────────────
 
 def resolve_permissions_node(state: GraphState) -> GraphState:
@@ -842,6 +866,7 @@ def router_node(state: GraphState) -> GraphState:
     q = q_raw.lower()
 
     from koinonia_assistant.rag.analytics_engine import classify_langgraph_intent
+    from koinonia_assistant.rag.name_search import detect_statistical_query
     intent_info = classify_langgraph_intent(q_raw)
     c_intent = intent_info.get("intent", "GENERAL_DATABASE_QUERY")
     s_tier = intent_info.get("speed_tier", "FAST")
@@ -865,6 +890,15 @@ def router_node(state: GraphState) -> GraphState:
         "classified_intent": c_intent,
         "speed_tier": s_tier,
         "intent_info": intent_info,
+        # Initialize SQL Fallback and Self-Correction tracking
+        "retrieval_status": None,
+        "retrieval_failed": False,
+        "sql_fallback_required": False,
+        "sql_fallback_attempted": False,
+        "sql_fallback_result": None,
+        "sql_retry_count": 0,
+        "sql_max_retries": 2,
+        "sql_retry_exhausted": False,
     }
 
     if c_intent == "GREETING" or any(phrase in q for phrase in ["how are you", "who are you", "what can you do", "introduce yourself"]):
@@ -880,21 +914,46 @@ def router_node(state: GraphState) -> GraphState:
             "route": "forecast_node",
         }
 
-    if c_intent in ("HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS", "TREND_ANALYSIS", "COMPARISON"):
+    if c_intent in ("HISTORICAL_ANALYSIS", "TREND_ANALYSIS", "COMPARISON"):
         return {
             **common_state,
             "route": "analytics_node",
         }
 
-    if c_intent in ("LIST", "COUNT", "MEMBER_SEARCH", "FAMILY_SEARCH", "SACRAMENT_SEARCH", "MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS"):
+    # 1. SQL Pipeline: Analytical / Aggregate / Statistical queries
+    stat_plan = detect_statistical_query(q_raw)
+    is_record_lookup = any(w in q for w in [
+        "family card", "family register", "tell me about", "who is the family head",
+        "address of this family", "contact number", "details of", "who belongs", "family members"
+    ]) or bool(intent_info.get("person_name"))
+
+    is_stat = (
+        intent_info.get("is_statistical")
+        or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS")
+        or (c_intent == "COUNT" and not is_record_lookup)
+        or (bool(stat_plan) and not is_record_lookup)
+        or any(w in q for w in [
+            "how many", "count of", "total members", "total families", "distribution",
+            "by gender", "age-wise", "above 60", "below 20", "under 18", "each year", "each bcc"
+        ])
+    )
+
+    if is_stat and not is_record_lookup:
         return {
             **common_state,
-            "route": "database_lookup_node",
+            "route": "sql_analytics",
+        }
+
+    # 2. Current Retrieval: Person / Member / Family records lookup
+    if c_intent in ("MEMBER_SEARCH", "FAMILY_SEARCH", "SACRAMENT_SEARCH", "LIST", "GENERAL_DATABASE_QUERY") or is_record_lookup:
+        return {
+            **common_state,
+            "route": "current_retrieval",
         }
 
     return {
         **common_state,
-        "route": "text_to_sql",
+        "route": "sql_analytics",
         "classified_intent": "GENERAL_DATABASE_QUERY",
     }
 
@@ -1076,12 +1135,87 @@ If the Current User Role is "Parish Priest", you MUST append WHERE filter clause
     ("human", "User question: {enhanced_query}"),
 ])
 
+def sql_fallback_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    orig_q = state.get("original_query") or state.get("question")
+    print(f"\n[LANGGRAPH] SQL FALLBACK NODE | request_id={req_id} | query='{orig_q}'")
+    print(f"[SQL_FALLBACK] Primary retrieval yielded NO_RESULT -> Transitioning query to SQL Pipeline.")
+    return {
+        **state,
+        "sql_fallback_attempted": True,
+        "sql_retry_count": 0,
+        "sql_max_retries": 2,
+        "sql_retry_exhausted": False,
+        "error_message": "",
+    }
+
+def sql_analytics_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    orig_q = state.get("original_query") or state.get("question")
+    print(f"\n[LANGGRAPH] SQL ANALYTICS NODE | request_id={req_id} | query='{orig_q}'")
+    return {
+        **state,
+        "sql_retry_count": 0,
+        "sql_max_retries": 2,
+        "sql_retry_exhausted": False,
+        "error_message": "",
+    }
+
+def query_plan_builder_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    orig_q = state.get("original_query") or state.get("question")
+    from koinonia_assistant.rag.sql_pipeline import (
+        build_complete_query_plan,
+        validate_query_plan_conditions
+    )
+    auth_ctx = state.get("authorization_context") or {}
+    user_parish = auth_ctx.get("parish_id") or state.get("user_parish")
+    user_diocese = auth_ctx.get("diocese_id") or state.get("user_diocese")
+    pre_intent = state.get("intent_info") or {}
+
+    plan = build_complete_query_plan(
+        question=orig_q,
+        original_query=orig_q,
+        pre_intent=pre_intent,
+        user_parish=user_parish,
+        user_diocese=user_diocese,
+        auth_ctx=auth_ctx
+    )
+    is_valid, val_err = validate_query_plan_conditions(orig_q, plan)
+    print(f"[LANGGRAPH] QUERY PLAN BUILDER NODE | request_id={req_id} | valid={is_valid} | intent={plan.get('intent')} | entity={plan.get('entity')} | filters={plan.get('filters')} | group_by={plan.get('group_by')}")
+
+    return {
+        **state,
+        "query_plan": plan,
+        "query_plan_valid": is_valid,
+        "query_plan_validation_error": val_err,
+    }
+
 def generate_sql_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    plan = state.get("query_plan")
+    orig_q = state.get("original_query") or state.get("question") or ""
+    role = state.get("user_role") or "Bishop"
+    parish = state.get("user_parish") or ""
+
+    if plan:
+        from koinonia_assistant.rag.sql_pipeline import generate_sql_from_plan
+        sql, expl = generate_sql_from_plan(
+            query_plan=plan,
+            user_role=role,
+            user_parish=parish,
+            user_diocese=state.get("user_diocese")
+        )
+        print(f"\n[LANGGRAPH] GENERATE SQL NODE (Plan-based) | request_id={req_id} | expl='{expl}'\nSQL:\n{sql}\n")
+        return {
+            **state,
+            "generated_sql": sql,
+            "llm_explanation": expl,
+        }
+
     print("[generate_sql] Generating SQL query...")
     q = state["enhanced_query"] or state["question"]
     q_low = q.lower()
-    role = state.get("user_role") or "Bishop"
-    parish = state.get("user_parish") or ""
 
     # ── Branch A0: Deterministic Tamil / Tanglish Structured Parser ─────────
     orig_q = state.get("question", "")
@@ -1507,87 +1641,218 @@ SELECT 'Marriage (திருமணம்)', COUNT(*) FROM `tabMember` WHERE mr
 
 
 def validate_sql_node(state: GraphState) -> GraphState:
-    print("[validate_sql] Validating SQL in sandbox...")
-    sql = state["generated_sql"]
-    
-    if sql == "UNSUPPORTED":
-        return {**state, "error_message": "Unsupported query"}
+    req_id = state.get("request_id", "N/A")
+    sql = state.get("generated_sql", "")
+    plan = state.get("query_plan") or {}
+    user_parish = state.get("user_parish")
+    print(f"\n[LANGGRAPH] VALIDATE SQL NODE | request_id={req_id} | validating SQL against query plan and schema...")
+
+    if not sql or sql == "UNSUPPORTED":
+        return {
+            **state,
+            "sql_valid": False,
+            "error_message": "Unsupported query",
+            "sql_error": "Unsupported query",
+        }
 
     # Basic safety checks
     sql_upper = sql.upper().strip()
     if not sql_upper.startswith("SELECT"):
-        return {**state, "error_message": "Only SELECT queries are allowed."}
-        
+        return {
+            **state,
+            "sql_valid": False,
+            "error_message": "Only SELECT queries are allowed.",
+            "sql_error": "Only SELECT queries are allowed."
+        }
+
     for forbidden in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "REPLACE", "CREATE"]:
         if re.search(r'\b' + forbidden + r'\b', sql_upper):
-            return {**state, "error_message": f"Query contains forbidden keyword: {forbidden}"}
+            err_msg = f"Query contains forbidden keyword: {forbidden}"
+            return {
+                **state,
+                "sql_valid": False,
+                "error_message": err_msg,
+                "sql_error": err_msg,
+            }
 
-    # Strict Role-Based Jurisdiction Validation for Parish Priest
-    role = state.get("user_role")
-    parish = state.get("user_parish")
-    if role == "Parish Priest" and parish:
-        sql_lower = sql.lower()
-        if parish.lower() not in sql_lower:
-            err_msg = f"Security Violation: As a Parish Priest of '{parish}', you are restricted from querying records outside your parish. Ensure your query filters by parish: `{parish}`."
-            print(f"[validate_sql] {err_msg}")
-            return {**state, "error_message": err_msg}
+    # 1. Plan and Schema Validation (11 checks - Rule 10)
+    from koinonia_assistant.rag.sql_pipeline import validate_sql_against_plan
+    valid, err = validate_sql_against_plan(sql, plan, user_parish=user_parish)
+    if not valid:
+        print(f"[validate_sql] Validation against plan failed: {err}")
+        return {
+            **state,
+            "sql_valid": False,
+            "error_message": err or "Plan validation failed",
+            "sql_error": err or "Plan validation failed",
+        }
 
-    # EXPLAIN Sandbox check in Frappe MariaDB
+    # 2. MariaDB EXPLAIN Check in sandbox
     import frappe
+    ensure_frappe_connected()
     try:
-        # Run EXPLAIN to validate syntax and table access
-        explain_sql = f"EXPLAIN {sql}"
-        frappe.db.sql(explain_sql)
-        print("[validate_sql] SQL validated successfully.")
-        return {**state, "error_message": ""}
+        frappe.db.sql(f"EXPLAIN {sql}")
+        print("[validate_sql] MariaDB EXPLAIN check PASSED.")
+        return {
+            **state,
+            "sql_valid": True,
+            "error_message": "",
+            "sql_error": None,
+        }
     except Exception as e:
-        error_msg = str(e)
-        print(f"[validate_sql] SQL Validation Failed: {error_msg}")
-        return {**state, "error_message": error_msg}
+        err_msg = str(e)
+        print(f"[validate_sql] MariaDB EXPLAIN check FAILED: {err_msg}")
+        return {
+            **state,
+            "sql_valid": False,
+            "error_message": err_msg,
+            "sql_error": err_msg,
+        }
 
-SQL_REWRITE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a SQL rewrite assistant for a MariaDB database in KOINONIA Parish Assistant.
-The SQL query you generated failed with a database error.
-Rewrite the SQL query to fix the error.
-
-Table Schemas:
-{relevant_tables}
-
-Failed SQL:
-{failed_sql}
-
-Database Error:
-{error_message}
-
-Return ONLY the corrected SQL query — no explanation, no markdown."""),
-    ("human", "Fix the SQL query."),
-])
-
-def rewrite_sql_node(state: GraphState) -> GraphState:
-    print(f"[rewrite_sql] Rewriting SQL. Retry count: {state.get('retry_count', 0) + 1}...")
-    retry = state.get("retry_count", 0) + 1
-    
-    response = llm.invoke(SQL_REWRITE_PROMPT.format_messages(
-        relevant_tables="\n\n".join(state["relevant_tables"]),
-        failed_sql=state["generated_sql"],
-        error_message=state["error_message"]
-    ))
-    
-    sql = response.content.strip().strip("`").strip("sql").strip()
-    print(f"[rewrite_sql] New SQL generated:\n  {sql}")
-    return {**state, "generated_sql": sql, "retry_count": retry}
+def decide_validation(state: GraphState) -> str:
+    if state.get("sql_valid"):
+        return "valid"
+    retries = state.get("sql_retry_count", 0)
+    max_retries = state.get("sql_max_retries", 2)
+    if retries < max_retries:
+        return "retry"
+    return "exhausted"
 
 def execute_sql_node(state: GraphState) -> GraphState:
-    print("[execute_sql] Running SQL against MariaDB...")
+    req_id = state.get("request_id", "N/A")
+    sql = state.get("generated_sql", "")
+    print(f"\n[LANGGRAPH] EXECUTE SQL NODE | request_id={req_id} | running SQL against MariaDB...")
     import frappe
+    ensure_frappe_connected()
     try:
-        rows = frappe.db.sql(state["generated_sql"], as_dict=True)
-        print(f"[execute_sql] Query returned {len(rows)} rows.")
-        return {**state, "sql_result": rows, "error_message": ""}
+        rows = frappe.db.sql(sql, as_dict=True)
+        print(f"[execute_sql] Query executed successfully. Returned {len(rows)} row(s).")
+        return {
+            **state,
+            "database_result": rows,
+            "sql_result": rows,
+            "sql_error": None,
+            "error_message": "",
+        }
     except Exception as e:
-        error_msg = str(e)
-        print(f"[execute_sql] Query execution failed: {error_msg}")
-        return {**state, "error_message": error_msg}
+        err_msg = str(e)
+        print(f"[execute_sql] Query execution error: {err_msg}")
+        return {
+            **state,
+            "database_result": None,
+            "sql_result": [],
+            "sql_error": err_msg,
+            "error_message": err_msg,
+        }
+
+def decide_execution(state: GraphState) -> str:
+    if not state.get("sql_error"):
+        return "success"
+    retries = state.get("sql_retry_count", 0)
+    max_retries = state.get("sql_max_retries", 2)
+    if retries < max_retries:
+        return "retry"
+    return "exhausted"
+
+def analyze_sql_error_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    err_str = state.get("sql_error") or state.get("error_message") or "Unknown SQL error"
+    sql = state.get("generated_sql", "")
+    plan = state.get("query_plan") or {}
+    cur_retry = (state.get("sql_retry_count") or 0) + 1
+
+    from koinonia_assistant.rag.sql_pipeline import analyze_sql_error
+    analysis = analyze_sql_error(err_str, sql, plan)
+    err_type = analysis.get("error_type", "CORRECTABLE_SQL_ERROR")
+
+    print(f"\n[LANGGRAPH] ANALYZE SQL ERROR NODE | request_id={req_id} | retry={cur_retry}/2 | type={err_type} | target={analysis.get('target')}")
+    return {
+        **state,
+        "sql_retry_count": cur_retry,
+        "sql_error_type": err_type,
+        "sql_previous_query": sql,
+        "sql_retry_reason": err_str,
+    }
+
+def regenerate_sql_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    sql = state.get("sql_previous_query") or state.get("generated_sql", "")
+    plan = state.get("query_plan") or {}
+    analysis = {
+        "error_type": state.get("sql_error_type"),
+        "target": None,
+        "error_str": state.get("sql_retry_reason")
+    }
+    user_parish = state.get("user_parish")
+
+    from koinonia_assistant.rag.sql_pipeline import regenerate_corrected_sql
+    corrected_sql = regenerate_corrected_sql(sql, plan, analysis, user_parish=user_parish)
+    print(f"[LANGGRAPH] REGENERATE SQL NODE | request_id={req_id} | corrected SQL:\n{corrected_sql}\n")
+    return {
+        **state,
+        "generated_sql": corrected_sql,
+        "sql_correction_attempt": True,
+        "error_message": "",
+        "sql_error": None,
+    }
+
+rewrite_sql_node = regenerate_sql_node
+
+def controlled_error_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    is_ta = state.get("detected_language") == "ta"
+    scope_name = state.get("user_parish") or "பங்கு"
+    print(f"\n[LANGGRAPH] CONTROLLED ERROR NODE | request_id={req_id} | Retries exhausted. Providing safe polite response.")
+
+    if is_ta:
+        reply = (
+            f"மன்னிக்கவும், **{scope_name}** பதிவேட்டில் நீங்கள் கேட்ட விவரங்களைத் துல்லியமாகத் திரட்டுவதில் தற்காலிகச் சிக்கல் ஏற்பட்டுள்ளது.\n\n"
+            "தயவுசெய்து உங்கள் கேள்வியை சற்று மாற்றி அல்லது குறிப்பிட்ட நபர் பெயர்/குடும்ப அட்டை எண்ணைக் கொண்டு கேட்கவும்."
+        )
+    else:
+        reply = (
+            f"I'm sorry, I was unable to retrieve the requested details from the **{scope_name}** registry at this moment.\n\n"
+            "Please try rephrasing your inquiry or specifying a member name or family card number."
+        )
+
+    return {
+        **state,
+        "sql_retry_exhausted": True,
+        "deterministic_reply": reply,
+        "final_answer": reply,
+        "final_response": reply,
+        "error_message": "",
+        "sql_error": None,
+        "route": "handled",
+        "sql_result": [],
+    }
+
+def result_validation_node(state: GraphState) -> GraphState:
+    req_id = state.get("request_id", "N/A")
+    rows = state.get("database_result") or state.get("sql_result") or []
+    plan = state.get("query_plan") or {}
+    q = state.get("original_query") or state.get("question")
+    user_parish = state.get("user_parish")
+    lang = state.get("detected_language", "en")
+
+    from koinonia_assistant.rag.sql_pipeline import validate_and_process_sql_results
+    processed = validate_and_process_sql_results(
+        sql_result=rows,
+        query_plan=plan,
+        question=q,
+        user_parish=user_parish,
+        language=lang
+    )
+
+    print(f"[LANGGRAPH] RESULT VALIDATION NODE | request_id={req_id} | count={processed.get('record_count')}")
+    return {
+        **state,
+        "deterministic_reply": processed.get("reply"),
+        "sql_result": processed.get("data", rows),
+        "authorized_record_count": processed.get("record_count", len(rows)),
+        "suggested_questions": processed.get("suggested_questions", []),
+        "route": "handled",
+    }
 
 RESPONSE_FORMAT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are the KOINONIA Parish Assistant.
@@ -1746,6 +2011,10 @@ def format_response_node(state: GraphState) -> GraphState:
     auth_ctx = state.get("authorization_context") or {}
     scope_type = auth_ctx.get("scope_type", "PARISH" if state.get("user_parish") else "DIOCESE")
     scope_name = auth_ctx.get("scope_name") or state.get("user_parish") or "Authorized Scope"
+
+    if state.get("sql_retry_exhausted"):
+        reply = state.get("deterministic_reply") or state.get("final_answer")
+        return {**state, "final_answer": reply, "final_response": reply}
 
     if state.get("error_message") == "Unsupported query" or state.get("generated_sql") == "UNSUPPORTED":
         if is_ta:
@@ -1918,27 +2187,13 @@ def database_lookup_node(state: GraphState) -> GraphState:
         stats_dims = detect_statistical_query(question)
 
     if stats_dims or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS"):
-        ensure_frappe_connected()
-        from koinonia_assistant.rag.name_search import execute_parish_statistics
-        dims = stats_dims or {
-            "is_statistical": True,
-            "intent": c_intent,
-            "entity": "MEMBER" if "MEMBER" in c_intent else ("FAMILY" if "FAMILY" in c_intent else "SACRAMENT"),
-            "metric": "COUNT",
-            "group_by": None,
-            "scope": "AUTHORIZED_PARISH",
-            "person_name": None
-        }
-        res = execute_parish_statistics(dims, user_parish=user_parish, user_diocese=user_diocese, auth_ctx=auth_ctx, language="ta" if is_ta else "en")
+        print(f"[LANGGRAPH] DATABASE NODE | Statistical query diverted to SQL Pipeline for execution visibility")
         return {
             **state,
-            "route": "handled",
-            "deterministic_reply": res["reply"],
-            "generated_sql": res.get("generated_sql", ""),
-            "sql_result": res.get("data", []),
-            "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-            "authorized_record_count": res.get("record_count", 1),
-            "suggested_questions": res.get("suggested_questions", []),
+            "retrieval_status": "NO_RESULT",
+            "retrieval_failed": True,
+            "sql_fallback_required": True,
+            "route": "fallback",
         }
 
     # 1. Family Card / Register Number Lookup (Strict Separation)
@@ -1997,20 +2252,13 @@ def database_lookup_node(state: GraphState) -> GraphState:
             as_dict=True,
         )
         if not fam_rows:
-            msg = (
-                f"உங்கள் அனுமதிக்கப்பட்ட பங்கு எல்லையில் (**{scope_name}**) {desc_ta} விவரம் எதுவும் கண்டறியப்படவில்லை."
-                if is_ta
-                else f"No family record matching {desc_en} is available within your authorized parish scope (**{scope_name}**)."
-            )
+            print(f"[LANGGRAPH] DATABASE NODE | Family code '{code_val}' not found in primary retrieval -> SQL Fallback")
             return {
                 **state,
-                "route": "handled",
-                "deterministic_reply": msg,
-                "generated_sql": "",
-                "sql_result": [],
-                "sql_validation_result": "BLOCKED_UNAUTHORIZED_FAMILY_CARD",
-                "authorized_record_count": 0,
-                "suggested_questions": [],
+                "retrieval_status": "NO_RESULT",
+                "retrieval_failed": True,
+                "sql_fallback_required": True,
+                "route": "fallback",
             }
         fid = fam_rows[0]["name"]
         bundle = fetch_full_family_bundle(fid, user_parish)
@@ -2020,7 +2268,10 @@ def database_lookup_node(state: GraphState) -> GraphState:
             reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
             return {
                 **state,
-                "route": "handled",
+                "retrieval_status": "SUCCESS",
+                "retrieval_failed": False,
+                "sql_fallback_required": False,
+                "route": "success",
                 "deterministic_reply": reply,
                 "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}' AND parish_id = '{user_parish or ''}'",
                 "sql_result": bundle.get("members", []),
@@ -2041,23 +2292,36 @@ def database_lookup_node(state: GraphState) -> GraphState:
             user_diocese=user_diocese,
             auth_ctx=auth_ctx,
         )
-        return {
-            **state,
-            "route": "handled",
-            "deterministic_reply": res["reply"],
-            "generated_sql": res["generated_sql"],
-            "sql_result": res["data"],
-            "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-            "authorized_record_count": res["records_retrieved"],
-            "suggested_questions": [
-                "List any 10 members who got 2 Sacraments",
-                f"Show baptism statistics for the last 10 years in {scope_name}",
-                "Compare baptism, confirmation and marriage over the last 10 years",
-            ],
-        }
+        data = res.get("data", [])
+        if data:
+            return {
+                **state,
+                "retrieval_status": "SUCCESS",
+                "retrieval_failed": False,
+                "sql_fallback_required": False,
+                "route": "success",
+                "deterministic_reply": res["reply"],
+                "generated_sql": res["generated_sql"],
+                "sql_result": data,
+                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
+                "authorized_record_count": res["records_retrieved"],
+                "suggested_questions": [
+                    "List any 10 members who got 2 Sacraments",
+                    f"Show baptism statistics for the last 10 years in {scope_name}",
+                    "Compare baptism, confirmation and marriage over the last 10 years",
+                ],
+            }
+        else:
+            return {
+                **state,
+                "retrieval_status": "NO_RESULT",
+                "retrieval_failed": True,
+                "sql_fallback_required": True,
+                "route": "fallback",
+            }
 
     # 2. Standard LIST_MEMBERS / LIST_FAMILIES
-    if c_intent == "LIST" and not has_person_in_query:
+    if c_intent == "LIST":
         sub = intent_info.get("sub_intent")
         req_count = intent_info.get("limit", 10)
         name_filter = intent_info.get("filter")
@@ -2065,108 +2329,39 @@ def database_lookup_node(state: GraphState) -> GraphState:
             res = handle_list_families(requested_count=req_count, user_parish=user_parish, user_diocese=user_diocese)
         else:
             res = handle_list_members(requested_count=req_count, name_filter=name_filter, user_parish=user_parish, user_diocese=user_diocese)
-        return {
-            **state,
-            "route": "handled",
-            "deterministic_reply": res["reply"],
-            "generated_sql": res.get("generated_sql", ""),
-            "sql_result": res.get("data", []),
-            "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-            "authorized_record_count": len(res.get("data", [])),
-            "suggested_questions": res.get("suggested_questions", []),
-        }
-
-    # 3. COUNT queries (Strictly scoped to authorized parish when scope_type == 'PARISH' — NEVER leaks diocesan total)
-    if c_intent == "COUNT":
-        sub = intent_info.get("sub_intent")
-        metrics = intent_info.get("metrics") or []
-        if sub == "COUNT_MEMBERS" and not metrics:
-            res = handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
+        data = res.get("data", [])
+        if data:
             return {
                 **state,
-                "route": "handled",
+                "retrieval_status": "SUCCESS",
+                "retrieval_failed": False,
+                "sql_fallback_required": False,
+                "route": "success",
                 "deterministic_reply": res["reply"],
                 "generated_sql": res.get("generated_sql", ""),
-                "sql_result": res.get("data", []),
+                "sql_result": data,
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": 1,
+                "authorized_record_count": len(data),
                 "suggested_questions": res.get("suggested_questions", []),
             }
-        elif sub == "COUNT_FAMILIES" and not metrics:
-            res = handle_count_families(user_parish=user_parish, user_diocese=user_diocese)
-            reply = res["reply"]
-            if is_ta:
-                cnt_f = (res.get("data") or [{}])[0].get("total_families", 0)
-                reply = f"**{scope_name}** பங்கில் மொத்தம் **{cnt_f}** குடும்பங்கள் பதிவு செய்யப்பட்டுள்ளன."
+        else:
             return {
                 **state,
-                "route": "handled",
-                "deterministic_reply": reply,
-                "generated_sql": res.get("generated_sql", ""),
-                "sql_result": res.get("data", []),
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": 1,
-                "suggested_questions": res.get("suggested_questions", []),
+                "retrieval_status": "NO_RESULT",
+                "retrieval_failed": True,
+                "sql_fallback_required": True,
+                "route": "fallback",
             }
-        elif metrics:
-            ensure_frappe_connected()
-            import frappe
-            from koinonia_assistant.rag.analytics_engine import SACRAMENT_METRICS, authorization_sql_validator
-            m_key = metrics[0]
-            meta = SACRAMENT_METRICS[m_key]
-            tbl = meta["table"]
-            d_col = meta["date_col"]
-            p_cols = meta["parish_cols"]
 
-            yr_match = re.search(r"\b(19\d\d|20\d\d)\b", question)
-            target_yr = int(yr_match.group(1)) if yr_match else None
-
-            where_c = ["1=1"]
-            params = []
-            if target_yr:
-                where_c.append(f"YEAR(`{d_col}`) = %s")
-                params.append(target_yr)
-
-            if scope_type == "PARISH" and user_parish:
-                p_or = " OR ".join([f"`{c}` = %s OR `{c}` LIKE %s" for c in p_cols])
-                where_c.append(f"({p_or})")
-                for _ in p_cols:
-                    params.extend([user_parish, f"%{user_parish}%"])
-
-            sql_exec = f"SELECT COUNT(*) AS total_count FROM `{tbl}` WHERE {' AND '.join(where_c)}"
-            val_res = authorization_sql_validator(sql_exec, auth_ctx)
-            if not val_res["valid"]:
-                raise PermissionError(f"SQL Validation Failed: {val_res['reason']}")
-
-            cnt_val = int(frappe.db.sql(sql_exec, tuple(params))[0][0])
-            yr_str = f" in **{target_yr}**" if target_yr else ""
-            if is_ta:
-                reply = (
-                    f"### 📊 {scope_name} — {meta['ta_label']} எண்ணிக்கை\n"
-                    f"- **அனுமதிக்கப்பட்ட பங்கு ({scope_name}):** மொத்தம் **`{cnt_val:,}`** {meta['ta_label']} பதிவுகள் உள்ளன."
-                )
-            else:
-                reply = (
-                    f"### 📊 {scope_name} — Verified {meta['label']} Record Count{yr_str}\n"
-                    f"- **Authorized Scope (`{scope_name}`):** **`{cnt_val:,}`** {meta['label'].lower()} record(s){yr_str}"
-                )
-            data_rows = [
-                {"Scope": scope_name, "Sacrament": meta["ta_label"] if is_ta else meta["label"], "Year": target_yr or "All Years", "Total Records": cnt_val}
-            ]
-            return {
-                **state,
-                "route": "handled",
-                "deterministic_reply": reply,
-                "generated_sql": sql_exec,
-                "sql_result": data_rows,
-                "sql_validation_result": val_res["reason"],
-                "authorized_record_count": cnt_val,
-                "suggested_questions": [
-                    f"What was the number of {meta['label'].lower()}s each year for the last 10 years?",
-                    f"How has {meta['label'].lower()} changed over the last 10 years?",
-                    f"Forecast {meta['label'].lower()} for the next 10 years",
-                ],
-            }
+    # 3. COUNT queries (Divert to SQL Pipeline for execution visibility)
+    if c_intent == "COUNT":
+        return {
+            **state,
+            "retrieval_status": "NO_RESULT",
+            "retrieval_failed": True,
+            "sql_fallback_required": True,
+            "route": "fallback",
+        }
 
 
 
@@ -2190,13 +2385,24 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS'] else [m]
                 return {
                     **state,
-                    "route": "handled",
+                    "retrieval_status": "SUCCESS",
+                    "retrieval_failed": False,
+                    "sql_fallback_required": False,
+                    "route": "success",
                     "deterministic_reply": reply,
                     "generated_sql": f"SELECT * FROM `tabMember` WHERE name = '{mid}'",
                     "sql_result": data_payload,
                     "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                     "authorized_record_count": len(data_payload),
                     "suggested_questions": suggestions,
+                }
+            else:
+                return {
+                    **state,
+                    "retrieval_status": "NO_RESULT",
+                    "retrieval_failed": True,
+                    "sql_fallback_required": True,
+                    "route": "fallback",
                 }
         elif fam_id_match:
             fid = fam_id_match.group(1)
@@ -2207,13 +2413,24 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
                 return {
                     **state,
-                    "route": "handled",
+                    "retrieval_status": "SUCCESS",
+                    "retrieval_failed": False,
+                    "sql_fallback_required": False,
+                    "route": "success",
                     "deterministic_reply": reply,
                     "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}'",
                     "sql_result": bundle.get("members", []),
                     "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                     "authorized_record_count": len(bundle.get("members", [])),
                     "suggested_questions": suggestions,
+                }
+            else:
+                return {
+                    **state,
+                    "retrieval_status": "NO_RESULT",
+                    "retrieval_failed": True,
+                    "sql_fallback_required": True,
+                    "route": "fallback",
                 }
 
     # 3-Level Member / Family / Sacrament Resolution (Supports both English & Tamil names via person_name entity)
@@ -2238,7 +2455,10 @@ def database_lookup_node(state: GraphState) -> GraphState:
             data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS', 'FAMILY_ALL_SACRAMENTS', 'FAMILY_BAPTISM_RECORDS', 'FAMILY_COMMUNION_RECORDS', 'FAMILY_CONFIRMATION_RECORDS', 'FAMILY_MARRIAGE_RECORDS', 'FAMILY_DEATH_RECORDS'] else [m]
             return {
                 **state,
-                "route": "handled",
+                "retrieval_status": "SUCCESS",
+                "retrieval_failed": False,
+                "sql_fallback_required": False,
+                "route": "success",
                 "deterministic_reply": reply,
                 "generated_sql": f"SELECT * FROM `tabMember` WHERE name = '{m.get('member_id')}' AND parish_id = '{user_parish or ''}'",
                 "sql_result": data_payload,
@@ -2255,7 +2475,10 @@ def database_lookup_node(state: GraphState) -> GraphState:
             fail_reply = person_res.get("reply")
             return {
                 **state,
-                "route": "handled",
+                "retrieval_status": "SUCCESS",
+                "retrieval_failed": False,
+                "sql_fallback_required": False,
+                "route": "success",
                 "deterministic_reply": fail_reply,
                 "generated_sql": "",
                 "sql_result": [],
@@ -2292,7 +2515,10 @@ def database_lookup_node(state: GraphState) -> GraphState:
             }
             return {
                 **state,
-                "route": "handled",
+                "retrieval_status": "AMBIGUOUS_CANDIDATES",
+                "retrieval_failed": False,
+                "sql_fallback_required": False,
+                "route": "disambiguation",
                 "deterministic_reply": disambig_msg,
                 "generated_sql": "",
                 "sql_result": [],
@@ -2301,40 +2527,38 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 "authorized_record_count": len(cands[:3]),
                 "suggested_questions": [c.get("prompt") for c in cands[:3]],
             }
-        elif person_res.get("status") == "low_confidence":
-            low_msg = person_res.get("reply") or (
-                "நபரை உறுதியாக அடையாளம் காண முடியவில்லை. முழுப் பெயர் அல்லது குடும்ப அட்டை எண்ணைக் கூறவும்."
-                if is_ta
-                else "I couldn't identify the person confidently. Please say the full name or family card number."
-            )
+        elif person_res.get("status") in ("low_confidence", "not_found"):
+            print(f"[LANGGRAPH] DATABASE NODE | Person search yielded {person_res.get('status')} -> Immediate SQL Fallback")
             return {
                 **state,
-                "route": "handled",
-                "deterministic_reply": low_msg,
-                "generated_sql": "",
-                "sql_result": [],
-                "disambiguation": None,
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": 0,
-                "suggested_questions": [
-                    "List any 10 members in my parish",
-                    "List any 10 families in my parish"
-                ],
-            }
-        elif person_res.get("status") == "not_found":
-            parish_label = f" in {user_parish}" if user_parish else ""
-            return {
-                **state,
-                "route": "handled",
-                "deterministic_reply": f"No parishioner or family records found matching '{person_name}'{parish_label}. Please verify the spelling or check with the parish office.",
-                "generated_sql": "",
-                "sql_result": [],
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": 0,
-                "suggested_questions": [],
+                "retrieval_status": "NO_RESULT",
+                "retrieval_failed": True,
+                "sql_fallback_required": True,
+                "route": "fallback",
             }
 
-    return {**state, "route": "fallback_sql"}
+    print(f"[LANGGRAPH] DATABASE NODE | Unhandled lookup -> Immediate SQL Fallback")
+    return {
+        **state,
+        "retrieval_status": "NO_RESULT",
+        "retrieval_failed": True,
+        "sql_fallback_required": True,
+        "route": "fallback",
+    }
+
+
+current_retrieval_node = database_lookup_node
+
+def decide_retrieval_result(state: GraphState) -> str:
+    status = state.get("retrieval_status")
+    route = state.get("route")
+    if status == "AMBIGUOUS_CANDIDATES" or route == "disambiguation":
+        return "disambiguation"
+    if status == "SUCCESS" or (not state.get("retrieval_failed") and state.get("deterministic_reply") and not state.get("sql_fallback_required")):
+        return "success"
+    return "sql_fallback"
+
+decide_db_lookup = decide_retrieval_result
 
 
 def analytics_node(state: GraphState) -> GraphState:
@@ -2418,32 +2642,10 @@ def forecast_node(state: GraphState) -> GraphState:
 
 
 def decide_route(state: GraphState):
-    return state["route"]
-
-def decide_db_lookup(state: GraphState):
-    if state.get("route") == "fallback_sql":
-        return "fallback_sql"
-    return "handled"
-
-def decide_validation(state: GraphState):
-    if state.get("error_message") == "Unsupported query":
-        return "unsupported"
-    elif state.get("error_message"):
-        if state.get("retry_count", 0) < MAX_RETRIES:
-            return "retry"
-        else:
-            return "failed"
-    else:
-        return "valid"
-
-def decide_execution(state: GraphState):
-    if state.get("error_message"):
-        if state.get("retry_count", 0) < MAX_RETRIES:
-            return "retry"
-        else:
-            return "failed"
-    else:
-        return "success"
+    r = state.get("route")
+    if r in ("greeting", "unclear", "current_retrieval", "database_lookup_node", "sql_analytics", "analytics_node", "forecast_node"):
+        return r
+    return "sql_analytics"
 
 # ─── Assemble LangGraph Workflow (Section 58: Authorization BEFORE Router/SQL/Analytics) ───
 
@@ -2454,15 +2656,22 @@ workflow.add_node("resolve_permissions", resolve_permissions_node)
 workflow.add_node("router", router_node)
 workflow.add_node("greeting", greeting_node)
 workflow.add_node("unclear", unclear_node)
+workflow.add_node("current_retrieval", current_retrieval_node)
 workflow.add_node("database_lookup_node", database_lookup_node)
 workflow.add_node("analytics_node", analytics_node)
 workflow.add_node("forecast_node", forecast_node)
-workflow.add_node("enhance_query", enhance_query_node)
-workflow.add_node("retrieve_context", retrieve_context_node)
+
+# SQL Pipeline Nodes
+workflow.add_node("sql_fallback", sql_fallback_node)
+workflow.add_node("sql_analytics", sql_analytics_node)
+workflow.add_node("query_plan_builder", query_plan_builder_node)
 workflow.add_node("generate_sql", generate_sql_node)
 workflow.add_node("validate_sql", validate_sql_node)
-workflow.add_node("rewrite_sql", rewrite_sql_node)
 workflow.add_node("execute_sql", execute_sql_node)
+workflow.add_node("analyze_sql_error", analyze_sql_error_node)
+workflow.add_node("regenerate_sql", regenerate_sql_node)
+workflow.add_node("controlled_error", controlled_error_node)
+workflow.add_node("result_validation", result_validation_node)
 workflow.add_node("format_response", format_response_node)
 
 # Set Mandatory Entry Point: resolve_permissions (Section 58)
@@ -2484,28 +2693,40 @@ workflow.add_conditional_edges(
     {
         "greeting": "greeting",
         "unclear": "unclear",
+        "current_retrieval": "current_retrieval",
         "database_lookup_node": "database_lookup_node",
+        "sql_analytics": "sql_analytics",
         "analytics_node": "analytics_node",
         "forecast_node": "forecast_node",
-        "text_to_sql": "enhance_query"
+        "text_to_sql": "sql_analytics"
+    }
+)
+
+# Add Conditional Edges from Current Retrieval
+workflow.add_conditional_edges(
+    "current_retrieval",
+    decide_retrieval_result,
+    {
+        "success": "format_response",
+        "disambiguation": "format_response",
+        "sql_fallback": "sql_fallback"
     }
 )
 
 workflow.add_conditional_edges(
     "database_lookup_node",
-    decide_db_lookup,
+    decide_retrieval_result,
     {
-        "handled": "format_response",
-        "fallback_sql": "enhance_query"
+        "success": "format_response",
+        "disambiguation": "format_response",
+        "sql_fallback": "sql_fallback"
     }
 )
 
-workflow.add_edge("analytics_node", "format_response")
-workflow.add_edge("forecast_node", "format_response")
-workflow.add_edge("greeting", END)
-workflow.add_edge("unclear", END)
-workflow.add_edge("enhance_query", "retrieve_context")
-workflow.add_edge("retrieve_context", "generate_sql")
+# SQL Pipeline Flow
+workflow.add_edge("sql_analytics", "query_plan_builder")
+workflow.add_edge("sql_fallback", "query_plan_builder")
+workflow.add_edge("query_plan_builder", "generate_sql")
 workflow.add_edge("generate_sql", "validate_sql")
 
 workflow.add_conditional_edges(
@@ -2513,24 +2734,32 @@ workflow.add_conditional_edges(
     decide_validation,
     {
         "valid": "execute_sql",
-        "retry": "rewrite_sql",
-        "unsupported": "format_response",
-        "failed": "format_response"
+        "retry": "analyze_sql_error",
+        "exhausted": "controlled_error"
     }
 )
-
-workflow.add_edge("rewrite_sql", "validate_sql")
 
 workflow.add_conditional_edges(
     "execute_sql",
     decide_execution,
     {
-        "success": "format_response",
-        "retry": "rewrite_sql",
-        "failed": "format_response"
+        "success": "result_validation",
+        "retry": "analyze_sql_error",
+        "exhausted": "controlled_error"
     }
 )
 
+# Self-Correction Retry Loop
+workflow.add_edge("analyze_sql_error", "regenerate_sql")
+workflow.add_edge("regenerate_sql", "validate_sql")
+
+# Final Branches
+workflow.add_edge("result_validation", "format_response")
+workflow.add_edge("controlled_error", "format_response")
+workflow.add_edge("analytics_node", "format_response")
+workflow.add_edge("forecast_node", "format_response")
+workflow.add_edge("greeting", END)
+workflow.add_edge("unclear", END)
 workflow.add_edge("format_response", END)
 
 # Compile Graph
@@ -2771,6 +3000,27 @@ def run_query(
         "disambiguation": None,
         "suggested_questions": None,
         "analysis_metadata": None,
+        # Section 32: Retrieval Fallback State
+        "retrieval_status": None,
+        "retrieval_failed": False,
+        "sql_fallback_required": False,
+        "sql_fallback_attempted": False,
+        "sql_fallback_result": None,
+        # Query Plan & Validation State
+        "query_plan": None,
+        "query_plan_valid": False,
+        "query_plan_validation_error": None,
+        "sql_valid": False,
+        "database_result": None,
+        # Section 11: SQL Self-Correction & Retry State
+        "sql_retry_count": 0,
+        "sql_max_retries": 2,
+        "sql_retry_reason": None,
+        "sql_previous_query": None,
+        "sql_error": None,
+        "sql_error_type": None,
+        "sql_correction_attempt": False,
+        "sql_retry_exhausted": False,
     }
 
     # Guarantee LangSmith trace capture with original_query & authorization metadata
@@ -2871,7 +3121,13 @@ def run_query(
         "scope_name": auth_ctx_out.get("scope_name"),
         "reply": final_reply,
         "answer": final_reply,
+        "final_answer": final_reply,
         "generated_sql": gen_sql,
+        "sql_fallback_attempted": final_state.get("sql_fallback_attempted"),
+        "sql_fallback_required": final_state.get("sql_fallback_required"),
+        "retrieval_status": final_state.get("retrieval_status"),
+        "query_plan": final_state.get("query_plan"),
+        "sql_retry_count": final_state.get("sql_retry_count"),
         "data": sql_res,
         "chart": chart_payload,
         "disambiguation": disambig,

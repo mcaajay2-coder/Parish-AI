@@ -204,32 +204,34 @@ def check_explicit_scope_violation(
                     "message": msg,
                 }
 
-        # Check 3: Family Card pre-verification against authorized parish (Sections 64 & 67)
+        # Check 3: Family Card cross-parish verification (Sections 64 & 67)
         m_card = re.search(r"\b([A-Z]{2,5}/\d{1,5})\b", q_raw, re.IGNORECASE)
         if m_card and user_parish:
             card_code = m_card.group(1).upper()
             try:
                 import frappe
-                rows = frappe.db.sql(
+                # Only deny if the card explicitly belongs to another parish
+                other_rows = frappe.db.sql(
                     """
                     SELECT name, parish_id
                     FROM `tabFamily`
-                    WHERE UPPER(family_register_number) = %s
-                      AND (parish_id = %s OR parish_id LIKE %s)
+                    WHERE (UPPER(family_register_number) = %s OR UPPER(family_card_number) = %s)
+                      AND parish_id != %s AND parish_id NOT LIKE %s
                     LIMIT 1
                     """,
-                    (card_code, user_parish, f"%{user_parish}%"),
+                    (card_code, card_code, user_parish, f"%{user_parish}%"),
                     as_dict=True,
                 )
-                if not rows:
+                if other_rows:
+                    other_p = other_rows[0].get("parish_id")
                     msg = (
-                        f"உங்கள் அனுமதிக்கப்பட்ட பங்கு எல்லையில் (**{scope_name}**) `{card_code}` என்ற குடும்ப அட்டை விவரம் எதுவும் கண்டறியப்படவில்லை."
+                        f"அனுமதி மறுக்கப்பட்டது: `{card_code}` குடும்ப அட்டை மற்றொரு பங்கிற்குரியது (**{other_p}**)."
                         if detected_language == "ta"
-                        else f"No family record matching `{card_code}` is available within your authorized parish scope (**{scope_name}**)."
+                        else f"Access Denied: Family card `{card_code}` belongs to another parish (**{other_p}**)."
                     )
                     return {
                         "authorized": False,
-                        "authorization_result": "DENIED_UNAUTHORIZED_FAMILY_CARD",
+                        "authorization_result": "DENIED_EXPLICIT_CROSS_PARISH_ACCESS",
                         "message": msg,
                     }
             except Exception:
