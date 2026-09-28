@@ -2081,7 +2081,8 @@ def database_lookup_node(state: GraphState) -> GraphState:
 
     # 4. Family Card Lookup (Sections 64 & 67: Verify card belongs to authorized parish BEFORE retrieving members)
     card_match = re.search(r"\b([A-Z]{2,5}/\d{1,5})\b", question, re.IGNORECASE)
-    if card_match:
+    has_person_in_query = bool(classify_query_intent(question).get("person_name"))
+    if card_match and not has_person_in_query:
         ensure_frappe_connected()
         import frappe
         card_code = card_match.group(1).upper()
@@ -2132,7 +2133,7 @@ def database_lookup_node(state: GraphState) -> GraphState:
     fam_id_match = re.search(r'\b(?:Family\s*ID|Family)[:\s]+([0-9]+)\b', question, re.IGNORECASE) or re.search(r'\bFAM-([0-9A-Z\-]+)\b', question, re.IGNORECASE)
     mem_id_match = re.search(r'\b(?:Member\s*ID|Member)[:\s]+([0-9]+)\b', question, re.IGNORECASE) or re.search(r'\bMEM-([0-9A-Z\-]+)\b', question, re.IGNORECASE)
 
-    if fam_id_match or mem_id_match:
+    if (fam_id_match or mem_id_match) and not has_person_in_query:
         intent = detect_query_intent(question)
         if mem_id_match and (intent in ["sacraments", "sacrament_details"] or not fam_id_match):
             mid = mem_id_match.group(1)
@@ -2203,6 +2204,27 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
                 "authorized_record_count": len(data_payload),
                 "suggested_questions": suggestions,
+                "member_id": person_res.get("member_id"),
+                "family_id": person_res.get("family_id"),
+                "family_card": person_res.get("family_card"),
+                "parish_id": person_res.get("parish_id"),
+                "anbiyam": person_res.get("anbiyam"),
+            }
+        elif person_res.get("status") == "constraint_failed":
+            fail_reply = person_res.get("reply")
+            return {
+                **state,
+                "route": "handled",
+                "deterministic_reply": fail_reply,
+                "generated_sql": "",
+                "sql_result": [],
+                "disambiguation": None,
+                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
+                "authorized_record_count": 0,
+                "suggested_questions": [
+                    "List any 10 members in my parish",
+                    "How many members are in each BCC?"
+                ],
             }
         elif person_res.get("status") == "candidates":
             cands = person_res.get("candidates", [])

@@ -86,6 +86,314 @@ PROTECTED_NAME_ROOTS = {
 
 TANGLISH_PARTICLES = {'kudu', 'sollu', 'kaattu', 'enna', 'oda', 'udaiya', 'ku', 'kku', 'patti', 'patri', 'tha', 'thaa', 'paru'}
 
+KNOWN_BCCS = [
+    "Arockiya Annai Anbiyam",
+    "St. Francis Xavier Anbiyam",
+    "St. Joseph Anbiyam",
+    "St. Joseph BCC",
+    "Lourdu Matha BCC",
+    "Sacred Heart BCC",
+    "St. Antony BCC",
+    "Infant Jesus BCC",
+    "Holy Cross BCC",
+    "Christ the King BCC",
+    "St. Jude BCC",
+    "Mother Teresa BCC",
+    "Velankanni Matha BCC",
+    "Holy Family BCC",
+    "St. Thomas BCC"
+]
+
+BCC_ALIASES = {
+    "arockiya annai": "Arockiya Annai Anbiyam",
+    "arokiya annai": "Arockiya Annai Anbiyam",
+    "arockia annai": "Arockiya Annai Anbiyam",
+    "arokkiya annai": "Arockiya Annai Anbiyam",
+    "ஆரோக்கிய அன்னை": "Arockiya Annai Anbiyam",
+    "அரோக்கிய அன்னை": "Arockiya Annai Anbiyam",
+    "st. joseph": "St. Joseph Anbiyam",
+    "st joseph": "St. Joseph Anbiyam",
+    "saint joseph": "St. Joseph Anbiyam",
+    "joseph": "St. Joseph Anbiyam",
+    "புனித சூசையப்பர்": "St. Joseph Anbiyam",
+    "சூசையப்பர்": "St. Joseph Anbiyam",
+    "st. francis xavier": "St. Francis Xavier Anbiyam",
+    "st francis xavier": "St. Francis Xavier Anbiyam",
+    "saint francis xavier": "St. Francis Xavier Anbiyam",
+    "francis xavier": "St. Francis Xavier Anbiyam",
+    "xavier": "St. Francis Xavier Anbiyam",
+    "புனித பிரான்சிஸ் சேவியர்": "St. Francis Xavier Anbiyam",
+    "சேவியர்": "St. Francis Xavier Anbiyam",
+}
+
+def resolve_canonical_bcc(raw_bcc_text: str, user_parish: str = None) -> Optional[str]:
+    """
+    Resolves raw user input (e.g. 'arockiya annai', 'St. Francis Xavier Anbiyam', 'arokiya annai anbiyam')
+    to the canonical BCC name in tabFamily.
+    """
+    if not raw_bcc_text:
+        return None
+    cleaned = re.sub(r'[\.,\-_/\\\'"]', ' ', raw_bcc_text.strip().lower())
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    # Exact or stripped check against known BCCs
+    for bcc in KNOWN_BCCS:
+        bcc_norm = re.sub(r'[\.,\-_/\\\'"]', ' ', bcc.lower())
+        bcc_norm = re.sub(r'\s+', ' ', bcc_norm).strip()
+        if cleaned == bcc_norm:
+            return bcc
+
+    # Check alias dictionary
+    for alias, canonical in BCC_ALIASES.items():
+        if alias in cleaned:
+            return canonical
+
+    # Base token matching
+    for bcc in KNOWN_BCCS:
+        bcc_base = re.sub(r'\b(?:anbiyam|bcc)\b', '', bcc.lower()).strip()
+        cleaned_base = re.sub(r'\b(?:anbiyam|bcc)\b', '', cleaned).strip()
+        if cleaned_base and (cleaned_base in bcc_base or bcc_base in cleaned_base):
+            return bcc
+
+    # Attempt query from database tabFamily
+    try:
+        import frappe
+        if getattr(frappe, "db", None):
+            db_res = frappe.db.sql(
+                "SELECT DISTINCT parish_bcc_id FROM `tabFamily` WHERE parish_bcc_id LIKE %s LIMIT 1",
+                (f"%{raw_bcc_text.strip()}%",),
+                as_dict=True
+            )
+            if db_res and db_res[0].get("parish_bcc_id"):
+                return db_res[0]["parish_bcc_id"]
+    except Exception:
+        pass
+
+    return raw_bcc_text.strip()
+
+def normalize_bcc_for_comparison(bcc_str: str) -> str:
+    if not bcc_str:
+        return ""
+    s = bcc_str.lower().strip()
+    s = re.sub(r'[\.,\-_/\\\'"]', ' ', s)
+    s = re.sub(r'\b(?:anbiyam|bcc|அன்பியம்)\b', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+def validate_candidate_hard_constraints(candidate: dict, constraints: dict) -> tuple[bool, list[str]]:
+    """
+    STRICT ENTITY, BCC, FAMILY AND MULTI-CONSTRAINT VALIDATION (Rules 3, 4, 5, 10, 16):
+    Validates candidate against all explicit user constraints:
+    - BCC / Anbiyam
+    - Family Card Number
+    - Parish Name
+    Returns (is_valid, failure_reasons).
+    """
+    reasons = []
+
+    # 1. BCC / Anbiyam Constraint (Rule 4)
+    req_bcc = constraints.get("bcc")
+    if req_bcc:
+        cand_bcc = candidate.get("anbiyam") or candidate.get("parish_bcc_id") or ""
+        norm_req = normalize_bcc_for_comparison(req_bcc)
+        norm_cand = normalize_bcc_for_comparison(cand_bcc)
+
+        bcc_matched = False
+        if norm_req and norm_cand:
+            if norm_req == norm_cand or norm_req in norm_cand or norm_cand in norm_req:
+                bcc_matched = True
+            elif resolve_canonical_bcc(norm_cand) == resolve_canonical_bcc(norm_req):
+                bcc_matched = True
+
+        if not bcc_matched:
+            cand_display = cand_bcc or "Unassigned BCC"
+            reasons.append(f"registered in '{cand_display}', not '{req_bcc}'")
+
+    # 2. Family Card Constraint (Rule 5)
+    req_card = constraints.get("family_card")
+    if req_card:
+        cand_card = (candidate.get("family_register_number") or candidate.get("family_card") or "").strip().upper()
+        norm_req_card = req_card.strip().upper()
+        if cand_card != norm_req_card:
+            reasons.append(f"registered under family card '{cand_card}', not '{norm_req_card}'")
+
+    # 3. Parish Constraint (Rule 15)
+    req_parish = constraints.get("parish")
+    if req_parish:
+        cand_parish = (candidate.get("parish_id") or "").strip().lower()
+        norm_req_p = req_parish.strip().lower()
+        if norm_req_p not in cand_parish and cand_parish not in norm_req_p:
+            reasons.append(f"registered in '{candidate.get('parish_id')}', not '{req_parish}'")
+
+    is_valid = (len(reasons) == 0)
+    return is_valid, reasons
+
+def extract_query_entities_and_constraints(query_text: str, user_parish: str = None) -> dict:
+    """
+    EXTRACT ALL ENTITIES BEFORE RETRIEVAL (Rule 1 & 2):
+    Identifies all entities and filtering constraints:
+    - person/member name
+    - BCC / Anbiyam
+    - family card number
+    - member ID
+    - parish
+    - year/date
+    - sacrament
+    - requested intent & response scope
+    Strips explicit constraints from query before isolating the person name.
+    """
+    q = (query_text or "").strip()
+    constraints = {
+        "person_name": None,
+        "bcc": None,
+        "family_card": None,
+        "member_id": None,
+        "parish": None,
+        "year": None,
+        "sacrament": None,
+        "intent": "GENERAL_MEMBER",
+        "scope": "GENERAL_MEMBER",
+        "stripped_query": q
+    }
+    if not q:
+        return constraints
+
+    working_q = q
+
+    # 1. Family Card Constraint
+    m_card = re.search(r'\b(?:card[:\s]+|from\s+|in\s+|family\s*card[:\s]+)?([A-Z]{2,5}[/\-]\d{1,5})\b', working_q, re.IGNORECASE)
+    if m_card:
+        constraints["family_card"] = m_card.group(1).upper()
+        working_q = working_q[:m_card.start()] + " " + working_q[m_card.end():]
+        working_q = re.sub(r'\s+', ' ', working_q).strip()
+
+    # 2. BCC Constraint
+    matched_bcc = None
+    for bcc in KNOWN_BCCS:
+        pat = r'\b(?:in\s+|from\s+|under\s+|belonging\s+to\s+|at\s+)?' + re.escape(bcc) + r'\b'
+        m = re.search(pat, working_q, re.IGNORECASE)
+        if m:
+            matched_bcc = bcc
+            working_q = working_q[:m.start()] + " " + working_q[m.end():]
+            working_q = re.sub(r'\s+', ' ', working_q).strip()
+            break
+
+    if not matched_bcc:
+        for alias, can_bcc in BCC_ALIASES.items():
+            pat = r'\b(?:in\s+|from\s+|under\s+|belonging\s+to\s+|at\s+)?' + re.escape(alias) + r'(?:\s+anbiyam|\s+bcc)?\b'
+            m = re.search(pat, working_q, re.IGNORECASE)
+            if m:
+                matched_bcc = can_bcc
+                working_q = working_q[:m.start()] + " " + working_q[m.end():]
+                working_q = re.sub(r'\s+', ' ', working_q).strip()
+                break
+
+    if not matched_bcc:
+        m_gen = re.search(r'\b(?:in\s+|from\s+|under\s+|belonging\s+to\s+|at\s+)?([A-Za-z0-9\.\'\s]{3,30}?)\s+(?:anbiyam|bcc)\b', working_q, re.IGNORECASE)
+        if m_gen:
+            cand_bcc = m_gen.group(1).strip()
+            cand_bcc = re.sub(r'^(?:the|our|this|a|an)\s+', '', cand_bcc, flags=re.IGNORECASE).strip()
+            matched_bcc = resolve_canonical_bcc(cand_bcc, user_parish)
+            working_q = working_q[:m_gen.start()] + " " + working_q[m_gen.end():]
+            working_q = re.sub(r'\s+', ' ', working_q).strip()
+
+    if not matched_bcc:
+        m_ta = re.search(r'([\u0B80-\u0BFF\s]{3,30}?)\s*(?:அன்பியத்தில்|அன்பியத்தின்|அன்பியம்)', working_q)
+        if m_ta:
+            cand_ta = m_ta.group(1).strip()
+            matched_bcc = resolve_canonical_bcc(cand_ta, user_parish)
+            working_q = working_q[:m_ta.start()] + " " + working_q[m_ta.end():]
+            working_q = re.sub(r'\s+', ' ', working_q).strip()
+
+    constraints["bcc"] = matched_bcc
+
+    # 3. Parish Constraint
+    m_parish = re.search(r'\b(?:in\s+|from\s+|of\s+)?([A-Za-z\s]+?)\s+parish\b', working_q, re.IGNORECASE)
+    if m_parish:
+        p_name = m_parish.group(1).strip().title()
+        if p_name.lower() not in ('our', 'this', 'the'):
+            constraints["parish"] = f"{p_name} Parish"
+            working_q = working_q[:m_parish.start()] + " " + working_q[m_parish.end():]
+            working_q = re.sub(r'\s+', ' ', working_q).strip()
+
+    constraints["stripped_query"] = working_q
+
+    # 4. Intent & Scope extraction
+    q_low = working_q.lower()
+    if re.search(r'\b(?:how\s+many\s+members|number\s+of\s+members|how\s+many\s+people)\b', q_low) or 'எத்தனை நபர்கள்' in q_low or 'எத்தனை உறுப்பினர்கள்' in q_low:
+        constraints["intent"] = "FAMILY_MEMBER_COUNT"
+        constraints["scope"] = "FAMILY_MEMBER_COUNT"
+    elif re.search(r'\b(?:family\s+details|family\s+members|household)\b', q_low) or 'குடும்ப விவரங்கள்' in q_low:
+        constraints["intent"] = "FAMILY_DETAILS"
+        constraints["scope"] = "FAMILY_DETAILS"
+    elif re.search(r'\b(?:baptism|baptised|baptized)\b', q_low) or 'திருமுழுக்கு' in q_low:
+        constraints["intent"] = "BAPTISM_STATUS"
+        constraints["scope"] = "BAPTISM_STATUS"
+        constraints["sacrament"] = "BAPTISM"
+    elif re.search(r'\b(?:communion|fhc)\b', q_low) or 'முதல் நற்கருணை' in q_low:
+        constraints["intent"] = "COMMUNION_STATUS"
+        constraints["scope"] = "COMMUNION_STATUS"
+        constraints["sacrament"] = "COMMUNION"
+    elif re.search(r'\b(?:confirmation)\b', q_low) or 'உறுதிப்பூசுதல்' in q_low:
+        constraints["intent"] = "CONFIRMATION_STATUS"
+        constraints["scope"] = "CONFIRMATION_STATUS"
+        constraints["sacrament"] = "CONFIRMATION"
+    elif re.search(r'\b(?:marriage|wedding)\b', q_low) or 'திருமணம்' in q_low:
+        constraints["intent"] = "MARRIAGE_STATUS"
+        constraints["scope"] = "MARRIAGE_STATUS"
+        constraints["sacrament"] = "MARRIAGE"
+    elif re.search(r'\b(?:mobile|phone|contact)\b', q_low) or 'தொடர்பு எண்' in q_low:
+        constraints["intent"] = "MEMBER_PHONE"
+        constraints["scope"] = "MEMBER_PHONE"
+    elif re.search(r'\b(?:address|where\s+does)\b', q_low) or 'முகவரி' in q_low:
+        constraints["intent"] = "MEMBER_ADDRESS"
+        constraints["scope"] = "MEMBER_ADDRESS"
+    else:
+        constraints["intent"] = "GENERAL_MEMBER"
+        constraints["scope"] = "GENERAL_MEMBER"
+
+    # 5. Extract Person Name from cleaned remaining working_q
+    clean_p = working_q
+    clean_p = re.sub(r'[\?!]+$', '', clean_p).strip()
+
+    # Multilingual / Tamil script handling
+    if any('\u0B80' <= ch <= '\u0BFF' for ch in clean_p):
+        try:
+            from koinonia_assistant.rag.tamil_utils import extract_person_entity_from_multilingual_query
+            ent = extract_person_entity_from_multilingual_query(clean_p)
+            extracted_ta = ent.get("transliterated_name") or ent.get("original_name")
+            if extracted_ta:
+                constraints["person_name"] = extracted_ta
+                return constraints
+        except Exception:
+            pass
+
+    # Check Form A1: How many people/members are in <person>'s family
+    m_fam_cnt = re.search(
+        r'\b(?:how\s+many|number\s+of|count\s+of)\s+(?:people|members|persons|family\s+members)?\s*(?:are\s+)?(?:there\s+)?(?:in|of)\s+(.+?)(?:\'s|’s|\s+family|\s+household|\?|$)',
+        clean_p,
+        re.IGNORECASE
+    )
+    if m_fam_cnt:
+        clean_p = m_fam_cnt.group(1).strip()
+    else:
+        # Check Form C: 'details of <person>'
+        m_of = re.search(r'\b(?:details\s+of|details\s+for|records\s+of|status\s+of|of|for|about)\s+([A-Za-z0-9\.\s]+)$', clean_p, re.IGNORECASE)
+        if m_of:
+            clean_p = m_of.group(1).strip()
+        else:
+            # Check Form D/E
+            clean_p = re.sub(r'^(?:show\s+|get\s+|find\s+|view\s+|give\s+|tell\s+me\s+about\s+|who\s+is\s+)', '', clean_p, flags=re.IGNORECASE).strip()
+            clean_p = re.sub(r'\s+(?:family\s+details?|family\s+members?|family|household|details|status|info|records?)$', '', clean_p, flags=re.IGNORECASE).strip()
+
+    # Final cleanup
+    clean_p = re.sub(r'(?:\'s|’s)$', '', clean_p).strip()
+    clean_p = re.sub(r'^(?:the|a|an|parishioner|member)\s+', '', clean_p, flags=re.IGNORECASE).strip()
+    clean_p = re.sub(r'\s+', ' ', clean_p).strip()
+
+    constraints["person_name"] = clean_p if clean_p else None
+    return constraints
+
 
 def preprocess_user_query(raw_query: str) -> dict:
     """
@@ -615,22 +923,33 @@ def classify_query_intent(query_text: str) -> dict:
             "statistical_dimensions": stats_dims
         }
 
+    # =========================================================================
+    # RULE 1 & 2: EXTRACT ALL ENTITIES & CONSTRAINTS BEFORE RETRIEVAL
+    # Strips BCC, card, and parish constraints so prepositions do not corrupt the person name!
+    # =========================================================================
+    constraints = extract_query_entities_and_constraints(q_clean)
+
     # Determine Scope first so FAMILY_MEMBER_COUNT / FAMILY_SACRAMENT_RECORDS with a person name are never hijacked
-    clean_no_id = re.sub(r'\s*\((?:Member\s*ID|Family\s*ID|Family\s*Card|Family|ID|Card)[:\s0-9A-Za-z,\s\-/]+\)', '', q_clean).strip()
+    clean_no_id = re.sub(r'\s*\((?:Member\s*ID|Family\s*ID|Family\s*Card|Family|ID|Card)[:\s0-9A-Za-z,\s\-/]+\)', '', constraints.get("stripped_query") or q_clean).strip()
     clean_no_id = re.sub(r'[\?!\.]+$', '', clean_no_id).strip()
-    scope = determine_response_scope(clean_no_id)
+    scope = constraints.get("scope") or determine_response_scope(clean_no_id)
+    if scope == "GENERAL_MEMBER":
+        det_scope = determine_response_scope(clean_no_id)
+        if det_scope != "GENERAL_MEMBER":
+            scope = det_scope
 
-    # Extract Person Name (English, Tamil, Tanglish, Mixed Tamil-English)
-    pname = None
+    # Extract Person Name
+    pname = constraints.get("person_name")
 
-    # Form A0: '<anything> (of|for|in|about) <person>'s family / <person> family (members)'
-    m_of_fam = re.search(
-        r'\b(?:of|for|in|about)\s+([A-Za-z\.\s]+?)(?:\'s|’s)?\s+(?:family\s+members?|family|household)\b',
-        clean_no_id,
-        re.IGNORECASE,
-    )
-    if m_of_fam:
-        pname = m_of_fam.group(1).strip()
+    if not pname:
+        # Form A0: '<anything> (of|for|in|about) <person>'s family / <person> family (members)'
+        m_of_fam = re.search(
+            r'\b(?:of|for|in|about)\s+([A-Za-z\.\s]+?)(?:\'s|’s)?\s+(?:family\s+members?|family|household)\b',
+            clean_no_id,
+            re.IGNORECASE,
+        )
+        if m_of_fam:
+            pname = m_of_fam.group(1).strip()
 
     # Form A0b: 'family members in <name>' / 'list the family members in <name>' (name trails after 'in', no possessive)
     if not pname:
@@ -758,10 +1077,15 @@ def classify_query_intent(query_text: str) -> dict:
             return {'intent': 'LIST_MEMBERS', 'scope': 'LIST_MEMBERS', 'requested_count': requested_count, 'name_filter': name_filter, 'person_name': None}
 
     intent = scope if pname else ('GENERAL_QUERY' if scope == 'GENERAL_MEMBER' else scope)
+    constraints["person_name"] = pname
+    constraints["scope"] = scope
+    constraints["intent"] = intent
+
     return {
         'intent': intent,
         'scope': scope,
-        'person_name': pname
+        'person_name': pname,
+        'constraints': constraints
     }
 
 def extract_intent_and_person(query_text: str) -> tuple[str, str]:
@@ -1538,6 +1862,7 @@ def resolve_member_and_family(
     intent = intent_res.get("intent", "GENERAL_QUERY").lower()
     person_name = intent_res.get("person_name") or ""
     scope = intent_res.get("scope", "GENERAL_MEMBER")
+    constraints = intent_res.get("constraints") or extract_query_entities_and_constraints(query_text, user_parish)
 
     if not person_name:
         return {"status": "not_found", "intent": intent, "response_scope": scope, "input_mode": input_mode}
@@ -1606,9 +1931,10 @@ def resolve_member_and_family(
     explicit_card_m = re.search(r'\bCard:\s*([A-Z]{2,5}/\d{1,5})\b', query_text, re.IGNORECASE)
     explicit_card = explicit_card_m.group(1).upper() if explicit_card_m else None
 
-    # Deduplicate members by member_id and score all authorized members
+    # Deduplicate members by member_id and score all authorized members against hard constraints
     seen_member_ids = set()
-    all_scored = []
+    valid_scored = []
+    failed_scored = []
     exact_matches = []
 
     for m in members:
@@ -1618,16 +1944,76 @@ def resolve_member_and_family(
         m.full_name = re.sub(r'\s+', ' ', m.full_name or '').strip()
         norm_full = normalize_name(m.full_name)
         m_card = (m.family_register_number or '').strip().upper()
-        if explicit_card:
-            if m_card == explicit_card:
-                exact_matches.append(m)
-        elif norm_full == norm_query:
-            exact_matches.append(m)
+
         score, category = compute_member_similarity(norm_query, norm_full)
-        all_scored.append((score, category, m))
+        is_valid, reasons = validate_candidate_hard_constraints(m, constraints)
 
-    all_scored.sort(key=lambda x: x[0], reverse=True)
+        if is_valid:
+            if explicit_card:
+                if m_card == explicit_card:
+                    exact_matches.append(m)
+            elif norm_full == norm_query:
+                exact_matches.append(m)
+            valid_scored.append((score, category, m))
+        else:
+            failed_scored.append((score, category, m, reasons))
 
+    valid_scored.sort(key=lambda x: x[0], reverse=True)
+    failed_scored.sort(key=lambda x: x[0], reverse=True)
+
+    # =========================================================================
+    # RULE 3, 4, 11: HARD CONSTRAINT ENFORCEMENT & NO SILENT FALLBACK
+    # If no candidate satisfied all hard constraints, or if the best-matching person for the name
+    # failed a hard constraint while only a poor/fuzzy competitor in another BCC/card matched:
+    # =========================================================================
+    should_report_constraint_failure = False
+    if not valid_scored:
+        if failed_scored and failed_scored[0][0] >= 60.0:
+            should_report_constraint_failure = True
+    elif failed_scored and failed_scored[0][0] >= 85.0:
+        top_valid_score = valid_scored[0][0]
+        top_failed_score = failed_scored[0][0]
+        if top_valid_score < 80.0 or (top_failed_score - top_valid_score) > 15.0:
+            should_report_constraint_failure = True
+
+    if should_report_constraint_failure:
+        top_failed_score, top_failed_cat, top_failed_m, top_failed_reasons = failed_scored[0]
+        from koinonia_assistant.rag.tamil_utils import is_tamil
+        is_ta = is_tamil(query_text)
+        cand_name = top_failed_m.full_name
+        reasons_str_en = ", and ".join(top_failed_reasons)
+        if is_ta:
+            reasons_ta = []
+            for r in top_failed_reasons:
+                if "registered under family card" in r:
+                    reasons_ta.append(f"குடும்ப அட்டை எண் `{top_failed_m.family_register_number}` கீழ் பதிவு செய்யப்பட்டுள்ளார், `{constraints.get('family_card')}` அல்ல")
+                elif "registered in" in r and "not" in r:
+                    reasons_ta.append(f"'{top_failed_m.anbiyam}' அன்பியத்தில் பதிவு செய்யப்பட்டுள்ளார், '{constraints.get('bcc')}' அன்பியத்தில் அல்ல")
+                else:
+                    reasons_ta.append(r)
+            reasons_str_ta = " மற்றும் ".join(reasons_ta)
+            reply = f"நீங்கள் குறிப்பிட்ட அனைத்து விவரங்களுக்கும் பொருந்தும் பதிவு கிடைக்கவில்லை. **{cand_name}** கண்டறியப்பட்டார், ஆனால் அவர் {reasons_str_ta}."
+        else:
+            if any("registered under family card" in r for r in top_failed_reasons):
+                reply = f"I couldn't find a record matching all the details you provided. **{cand_name}** is {reasons_str_en}."
+            else:
+                reply = f"I couldn't find a record matching all the details you provided. I found **{cand_name}**, but they are {reasons_str_en}."
+
+        return {
+            "status": "constraint_failed",
+            "reply": reply,
+            "person_name": cand_name,
+            "failed_reasons": top_failed_reasons,
+            "intent": intent,
+            "response_scope": scope,
+            "input_mode": input_mode,
+            "top_score": top_failed_score
+        }
+
+    if not valid_scored:
+        return {"status": "not_found", "intent": intent, "response_scope": scope, "input_mode": input_mode}
+
+    all_scored = valid_scored
     top_score, top_cat, top_m = all_scored[0] if all_scored else (0.0, "NONE", None)
     second_score, second_cat, second_m = all_scored[1] if len(all_scored) > 1 else (0.0, "NONE", None)
     score_gap = round(top_score - second_score, 1)
@@ -1639,7 +2025,7 @@ def resolve_member_and_family(
     cands_pool = []
     if explicit_card:
         # Rule 6, 7, 10, 18: Exact Family Card / Member ID is authoritative
-        card_matches = [m for m in members if (m.family_register_number or '').strip().upper() == explicit_card]
+        card_matches = [m for m in valid_scored if (m.family_register_number or '').strip().upper() == explicit_card]
         if card_matches:
             selected_member = card_matches[0]
             decision = "EXACT_CARD_MATCH"
@@ -1753,6 +2139,8 @@ def resolve_member_and_family(
     if action == "DIRECT_RESULT" and selected_member:
         fam_bundle = fetch_full_family_bundle(selected_member.family_id, selected_member.parish_id)
         sac_bundle = fetch_member_sacrament_bundle(selected_member.member_id, selected_member.parish_id)
+        card_str = selected_member.family_register_number or selected_member.family_id or ""
+        anbiyam_str = selected_member.anbiyam or (fam_bundle.get("family") or {}).get("parish_bcc_id") or ""
         return {
             "status": "exact",
             "matched_member": selected_member,
@@ -1762,6 +2150,9 @@ def resolve_member_and_family(
             "response_scope": scope,
             "member_id": selected_member.member_id,
             "family_id": selected_member.family_id,
+            "family_card": card_str,
+            "parish_id": selected_member.parish_id,
+            "anbiyam": anbiyam_str,
             "match_decision": decision,
             "match_status": decision,
             "confirmation_required": False,
@@ -2311,20 +2702,22 @@ def render_scoped_response(
     full_name = re.sub(r'\s+', ' ', str(raw_fn)).strip()
     parish = target_member.get("parish_id") or "the parish"
     fam = (fam_bundle.get("family") if fam_bundle else None) or {}
-    card_no = fam.get("family_register_number") or target_member.get("family_card") or target_member.get("family_id") or "N/A"
+    card_no = fam.get("family_register_number") or target_member.get("family_register_number") or target_member.get("family_card") or target_member.get("family_id") or "N/A"
+    anbiyam = target_member.get("anbiyam") or fam.get("parish_bcc_id") or ""
     members = (fam_bundle.get("members") if fam_bundle else None) or [target_member]
 
     if scope == 'FAMILY_MEMBER_COUNT':
         count_val = len(members)
+        bcc_suffix = f", {anbiyam}" if anbiyam else ""
         if is_ta:
-            reply = f"**{full_name}** குடும்பத்தில் **{count_val}** உறுப்பினர்கள் உள்ளனர் (குடும்ப அட்டை: `{card_no}`)."
+            reply = f"**{full_name}** குடும்பத்தில் **{count_val}** உறுப்பினர்கள் உள்ளனர் (குடும்ப அட்டை: `{card_no}`{bcc_suffix})."
             suggestions = [
                 f"{full_name} குடும்ப உறுப்பினர்களின் விவரங்களை காட்டவும்",
                 f"{full_name} குடும்பத்தின் தொடர்பு எண்ணை காட்டவும்",
                 f"{full_name} குடும்ப அட்டை விவரங்களை காட்டவும்",
             ]
         else:
-            reply = f"There are **{count_val}** members in **{full_name}**'s family (Family Card: `{card_no}`)."
+            reply = f"There are **{count_val}** members in **{full_name}**'s family (Family Card: `{card_no}`{bcc_suffix})."
             suggestions = [
                 f"Show all family members of {full_name}",
                 f"What is {full_name}'s phone number?",
@@ -2694,10 +3087,12 @@ def render_scoped_response(
         street = target_member.get("family_address") or target_member.get("street") or fam.get("street") or ""
         city = fam.get("city") or ""
         address = f"{street}, {city}".strip(", ") if city else (street or "N/A")
+        bcc_name = target_member.get("anbiyam") or fam.get("parish_bcc_id") or "N/A"
         if is_ta:
             lines = [
                 f"### 👤 பங்கு உறுப்பினர்: {full_name}",
                 f"- **குடும்ப அட்டை எண்:** `{card_no}`",
+                f"- **அன்பியம் (BCC):** {bcc_name}",
                 f"- **பங்கு:** {parish}",
                 f"- **தொடர்பு எண்:** {mob}",
                 f"- **முகவரி:** {address}",
@@ -2711,6 +3106,7 @@ def render_scoped_response(
             lines = [
                 f"### 👤 Parishioner: {full_name}",
                 f"- **Family Card No:** `{card_no}`",
+                f"- **BCC / Anbiyam:** {bcc_name}",
                 f"- **Parish:** {parish}",
                 f"- **Contact:** {mob}",
                 f"- **Address:** {address}",
