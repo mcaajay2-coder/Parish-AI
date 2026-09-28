@@ -1135,13 +1135,37 @@ If the Current User Role is "Parish Priest", you MUST append WHERE filter clause
     ("human", "User question: {enhanced_query}"),
 ])
 
+def _fetch_pgvector_rag_context(orig_q: str, enhanced_q: str, query_emb: list) -> tuple:
+    rel_tables = []
+    rel_fields = []
+    few_shots = ""
+    try:
+        if not query_emb:
+            query_emb = embed_text(orig_q)
+        rel_tables = fetch_relevant_schemas(orig_q, enhanced_q or orig_q, query_emb, k=3)
+        rel_fields = fetch_relevant_fields(query_emb, k=10)
+        few_shots = fetch_few_shot_examples(query_emb, k=2)
+        print(f"[RAG pgvector] Successfully retrieved {len(rel_tables)} tables and {len(rel_fields)} relevant fields.")
+    except Exception as e:
+        print(f"[RAG pgvector] Schema retrieval fallback: {e}")
+    return query_emb, rel_tables, rel_fields, few_shots
+
 def sql_fallback_node(state: GraphState) -> GraphState:
     req_id = state.get("request_id", "N/A")
     orig_q = state.get("original_query") or state.get("question")
+    enhanced_q = state.get("enhanced_query") or orig_q
     print(f"\n[LANGGRAPH] SQL FALLBACK NODE | request_id={req_id} | query='{orig_q}'")
     print(f"[SQL_FALLBACK] Primary retrieval yielded NO_RESULT -> Transitioning query to SQL Pipeline.")
+    
+    query_emb, rel_tables, rel_fields, few_shots = _fetch_pgvector_rag_context(
+        orig_q, enhanced_q, state.get("query_embedding")
+    )
     return {
         **state,
+        "query_embedding": query_emb,
+        "relevant_tables": rel_tables or state.get("relevant_tables") or [],
+        "relevant_fields": rel_fields or state.get("relevant_fields") or [],
+        "few_shot_examples": few_shots or state.get("few_shot_examples") or "",
         "sql_fallback_attempted": True,
         "sql_retry_count": 0,
         "sql_max_retries": 2,
@@ -1152,9 +1176,18 @@ def sql_fallback_node(state: GraphState) -> GraphState:
 def sql_analytics_node(state: GraphState) -> GraphState:
     req_id = state.get("request_id", "N/A")
     orig_q = state.get("original_query") or state.get("question")
+    enhanced_q = state.get("enhanced_query") or orig_q
     print(f"\n[LANGGRAPH] SQL ANALYTICS NODE | request_id={req_id} | query='{orig_q}'")
+    
+    query_emb, rel_tables, rel_fields, few_shots = _fetch_pgvector_rag_context(
+        orig_q, enhanced_q, state.get("query_embedding")
+    )
     return {
         **state,
+        "query_embedding": query_emb,
+        "relevant_tables": rel_tables or state.get("relevant_tables") or [],
+        "relevant_fields": rel_fields or state.get("relevant_fields") or [],
+        "few_shot_examples": few_shots or state.get("few_shot_examples") or "",
         "sql_retry_count": 0,
         "sql_max_retries": 2,
         "sql_retry_exhausted": False,
