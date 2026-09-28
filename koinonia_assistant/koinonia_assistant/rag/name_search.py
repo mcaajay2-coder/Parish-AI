@@ -250,28 +250,102 @@ def validate_candidate_hard_constraints(candidate: dict, constraints: dict) -> t
 # STRICT FILTER / CONDITION PRESERVATION FOR STATISTICS QUERIES (Sections 1-13)
 # =============================================================================
 
+TAMIL_NUMBER_WORDS = {
+    # 1 - 10
+    "ஒன்று": 1, "ஒன்னு": 1, "ஒரு": 1,
+    "இரண்டு": 2, "ரெண்டு": 2, "இரு": 2,
+    "மூன்று": 3, "மூணு": 3,
+    "நான்கு": 4, "நாலு": 4,
+    "ஐந்து": 5, "அஞ்சு": 5,
+    "ஆறு": 6,
+    "ஏழு": 7,
+    "எட்டு": 8,
+    "ஒன்பது": 9,
+    "பத்து": 10,
+    # 11 - 19
+    "பதினொன்று": 11, "பதினொன்னு": 11,
+    "பன்னிரண்டு": 12, "பன்னிரெண்டு": 12,
+    "பதின்மூன்று": 13, "பதிமூன்று": 13, "பதிமூணு": 13,
+    "பதினான்கு": 14, "பதினாங்கு": 14,
+    "பதினைந்து": 15, "பதினஞ்சு": 15,
+    "பதினாறு": 16,
+    "பதினேழு": 17,
+    "பதினெட்டு": 18,
+    "பத்தொன்பது": 19,
+    # Tens
+    "இருபது": 20, "இருவது": 20,
+    "முப்பது": 30,
+    "நாற்பது": 40, "நாப்பது": 40,
+    "ஐம்பது": 50, "அம்பது": 50,
+    "அறுபது": 60,
+    "எழுபது": 70,
+    "எண்பது": 80,
+    "தொண்ணூறு": 90,
+    "நூறு": 100,
+    # Compound numbers
+    "இருபத்தொரு": 21, "இருபத்தொன்று": 21, "இருபத்திரண்டு": 22, "இருபத்துமூன்று": 23, "இருபத்துநான்கு": 24, "இருபத்தைந்து": 25, "இருபத்தாறு": 26, "இருபத்தேழு": 27, "இருபத்தெட்டு": 28, "இருபத்தொன்பது": 29,
+    "முப்பத்தொரு": 31, "முப்பத்தொன்று": 31, "முப்பத்திரண்டு": 32, "முப்பத்துமூன்று": 33, "முப்பத்துநான்கு": 34, "முப்பத்தைந்து": 35, "முப்பத்தாறு": 36, "முப்பத்தேழு": 37, "முப்பத்தெட்டு": 38, "முப்பத்தொன்பது": 39,
+    "நாற்பத்தொரு": 41, "நாற்பத்தொன்று": 41, "நாற்பத்திரண்டு": 42, "நாற்பத்துமூன்று": 43, "நாற்பத்துநான்கு": 44, "நாற்பத்தைந்து": 45, "நாற்பத்தாறு": 46, "நாற்பத்தேழு": 47, "நாற்பத்தெட்டு": 48, "நாற்பத்தொன்பது": 49,
+    "ஐம்பத்தொரு": 51, "ஐம்பத்தொன்று": 51, "ஐம்பத்திரண்டு": 52, "ஐம்பத்துமூன்று": 53, "ஐம்பத்துநான்கு": 54, "ஐம்பத்தைந்து": 55, "ஐம்பத்தாறு": 56, "ஐம்பத்தேழு": 57, "ஐம்பத்தெட்டு": 58, "ஐம்பத்தொன்பது": 59,
+    "அறுபத்தொரு": 61, "அறுபத்தொன்று": 61, "அறுபத்திரண்டு": 62, "அறுபத்துமூன்று": 63, "அறுபத்துநான்கு": 64, "அறுபத்தைந்து": 65, "அறுபத்தாறு": 66, "அறுபத்தேழு": 67, "அறுபத்தெட்டு": 68, "அறுபத்தொன்பது": 69,
+    "எழுபத்தொரு": 71, "எழுபத்தொன்று": 71, "எழுபத்திரண்டு": 72, "எழுபத்துமூன்று": 73, "எழுபத்துநான்கு": 74, "எழுபத்தைந்து": 75, "எழுபத்தாறு": 76, "எழுபத்தேழு": 77, "எழுபத்தெட்டு": 78, "எழுபத்தொன்பது": 79,
+    "எண்பத்தொரு": 81, "எண்பத்தொன்று": 81, "எண்பத்திரண்டு": 82, "எண்பத்துமூன்று": 83, "எண்பத்துநான்கு": 84, "எண்பத்தைந்து": 85, "எண்பத்தாறு": 86, "எண்பத்தேழு": 87, "எண்பத்தெட்டு": 88, "எண்பத்தொன்பது": 89,
+}
+
+ENGLISH_NUMBER_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "twenty-one": 21, "twenty-two": 22, "twenty-three": 23, "twenty-four": 24, "twenty-five": 25,
+    "twenty-six": 26, "twenty-seven": 27, "twenty-eight": 28, "twenty-nine": 29,
+    "thirty": 30, "thirty-five": 35,
+    "forty": 40, "forty-five": 45,
+    "fifty": 50, "fifty-five": 55,
+    "sixty": 60, "sixty-five": 65,
+    "seventy": 70, "seventy-five": 75,
+    "eighty": 80, "eighty-five": 85,
+    "ninety": 90, "hundred": 100
+}
+
+def normalize_age_number_words(text: str) -> str:
+    """Normalizes natural language number words (Tamil & English) into numerical digits."""
+    t = text or ""
+    # English number words
+    for w, num in ENGLISH_NUMBER_WORDS.items():
+        t = re.sub(r'\b' + re.escape(w) + r'\b', str(num), t, flags=re.IGNORECASE)
+    # Tamil number words (sorted longest first to avoid partial replacements)
+    for w, num in sorted(TAMIL_NUMBER_WORDS.items(), key=lambda x: len(x[0]), reverse=True):
+        t = re.sub(r'(?:^|\s|[^\u0B80-\u0BFF])' + re.escape(w) + r'(?:\s|$|[^\u0B80-\u0BFF])', f' {num} ', t)
+        t = re.sub(re.escape(w) + r'(\s*(?:வயது|வயதிற்கு|வயதுக்கு|வயதின்|ஆண்டு))', f' {num}\\1', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
 def extract_age_filter(query_text: str) -> Optional[dict]:
     """
     Extracts and standardizes natural language age filters, comparison operators,
-    exact values, and ranges (Sections 1, 2, 3):
+    exact values, and ranges (Sections 1, 2, 3).
+    Supports digits and words (English & Tamil):
     - "members age less than 20", "below 20", "under 20", "younger than 20" -> {"operator": "<", "value": 20}
     - "18 and below", "18 and under", "<= 18" -> {"operator": "<=", "value": 18}
     - "above 60", "over 60", "older than 60", "> 60" -> {"operator": ">", "value": 60}
     - "60 and above", "60 and over", ">= 60" -> {"operator": ">=", "value": 60}
     - "exactly 20 years old", "age 20", "aged 20" -> {"operator": "=", "value": 20}
     - "between 20 and 40", "age 20 to 40", "members aged 20-40" -> {"min": 20, "max": 40}
-    - Full Tamil age expressions support
+    - Full Tamil age expressions:
+      - "அறுபது வயதிற்கு மேற்பட்டவர்கள்" -> {"operator": ">", "value": 60}
+      - "20 வயதுக்கு குறைவானவர்கள்" -> {"operator": "<", "value": 20}
     """
     if not query_text:
         return None
-    q = query_text.lower().strip()
+    q = normalize_age_number_words(query_text).lower().strip()
 
-    # 1. Range Patterns (e.g. "between 20 and 40", "age 20 to 40", "members aged 20-40")
+    # 1. Range Patterns (e.g. "between 20 and 40", "age 20 to 40", "members aged 20-40", "20 முதல் 40 வயது வரை")
     m_range = (
-        re.search(r'\bbetween\s+(\d+)\s+(?:and|to|-)\s+(\d+)\b', q) or
-        re.search(r'\b(?:age|aged)\s+(\d+)\s*(?:to|-)\s*(\d+)\b', q) or
-        re.search(r'\b(?:from\s+)?(\d+)\s*(?:to|-)\s*(\d+)\s*(?:years?\s*old|years?|age)?\b', q) or
-        re.search(r'(\d+)\s*(?:முதல்|-)\s*(\d+)\s*(?:வயது\s*வரை|வரை|வயதுக்குள்)', q)
+        re.search(r'\bbetween\s+(\d+)\s+(?:and|to|-)\s+(\d+)\b', q, re.IGNORECASE) or
+        re.search(r'\b(?:age|aged)\s+(\d+)\s*(?:to|-)\s*(\d+)\b', q, re.IGNORECASE) or
+        re.search(r'\b(?:from\s+)?(\d+)\s*(?:to|-)\s*(\d+)\s*(?:years?\s*old|years?|age)?\b', q, re.IGNORECASE) or
+        re.search(r'(\d+)\s*(?:முதல்|-|இருந்து)\s*(\d+)\s*(?:வயது\s*வரை|வரை|வயதுக்குள்|வயதிற்குள்)', q)
     )
     if m_range:
         v1 = int(m_range.group(1))
@@ -286,10 +360,10 @@ def extract_age_filter(query_text: str) -> Optional[dict]:
 
     # 2. Less than or equal to (<=) (e.g. "18 and below", "18 and under", "<= 18")
     m_lte = (
-        re.search(r'\b(\d+)\s*(?:years?\s*old\s+)?(?:and\s+below|and\s+under|or\s+below|or\s+under)\b', q) or
+        re.search(r'\b(\d+)\s*(?:years?\s*old\s+)?(?:and\s+below|and\s+under|or\s+below|or\s+under)\b', q, re.IGNORECASE) or
         re.search(r'<=\s*(\d+)', q) or
-        re.search(r'\b(?:at\s+most|maximum\s+of|up\s+to)\s+(\d+)\b', q) or
-        re.search(r'(\d+)\s*(?:வயது\s*மற்றும்\s*அதற்கு\s*கீழ்|வயது\s*மற்றும்\s*அதற்கு\s*குறைவான)', q)
+        re.search(r'\b(?:at\s+most|maximum\s+of|up\s+to)\s+(\d+)\b', q, re.IGNORECASE) or
+        re.search(r'(\d+)\s*(?:வயது|வயதுக்கு|வயதிற்கு)?\s*(?:மற்றும்|அல்லது)\s*அதற்கு\s*(?:கீழ்|குறைவானவர்கள்|குறைவான|குறைந்தவர்கள்|குறைந்த)', q)
     )
     if m_lte:
         return {
@@ -301,8 +375,9 @@ def extract_age_filter(query_text: str) -> Optional[dict]:
 
     # 3. Less than (<) (e.g. "age less than 20", "age less then 20", "below 20", "under 20", "younger than 20", "< 20")
     m_lt = (
-        re.search(r'\b(?:age|aged)?\s*(?:less\s+(?:than|then)|below|under|younger\s+than|<\s*)\s*(\d+)\b', q) or
-        re.search(r'(\d+)\s*(?:வயதுக்கு\s*குறைவான|வயதுக்கு\s*குறைந்த|வயதுக்கு\s*கீழ்|வயதுக்கு\s*உட்பட்ட|வயதுக்கும்\s*குறைவான)', q)
+        re.search(r'\b(?:age|aged)?\s*(?:less\s+(?:than|then)|below|under|younger\s+than|<\s*)\s*(\d+)\b', q, re.IGNORECASE) or
+        re.search(r'(\d+)\s*(?:வயதுக்கு|வயதிற்கு|வயதுக்கும்|வயதிற்கும்|வயது|வயதின்)?\s*(?:குறைவானவர்கள்|குறைவானவர்கள்?|குறைவான|குறைந்தவர்கள்|குறைந்த|கீழ்|கீழான|உட்பட்டவர்கள்|உட்பட்ட)(?:\s*உள்ளவர்கள்)?', q) or
+        re.search(r'(?:குறைவானவர்கள்|குறைவானவர்கள்?|குறைவான|குறைந்தவர்கள்|குறைந்த|கீழ்|உட்பட்ட)\s*(\d+)\s*(?:வயதுக்கு|வயதிற்கு|வயது)?', q)
     )
     if m_lt:
         return {
@@ -314,10 +389,10 @@ def extract_age_filter(query_text: str) -> Optional[dict]:
 
     # 4. Greater than or equal to (>=) (e.g. "60 and above", "60 and over", ">= 60")
     m_gte = (
-        re.search(r'\b(\d+)\s*(?:years?\s*old\s+)?(?:and\s+above|and\s+over|or\s+above|or\s+over|and\s+older)\b', q) or
+        re.search(r'\b(\d+)\s*(?:years?\s*old\s+)?(?:and\s+above|and\s+over|or\s+above|or\s+over|and\s+older)\b', q, re.IGNORECASE) or
         re.search(r'>=\s*(\d+)', q) or
-        re.search(r'\b(?:at\s+least|minimum\s+of)\s+(\d+)\b', q) or
-        re.search(r'(\d+)\s*(?:வயது\s*மற்றும்\s*அதற்கு\s*மேல்|வயது\s*மற்றும்\s*அதற்கு\s*அதிகமான)', q)
+        re.search(r'\b(?:at\s+least|minimum\s+of)\s+(\d+)\b', q, re.IGNORECASE) or
+        re.search(r'(\d+)\s*(?:வயது|வயதுக்கு|வயதிற்கு)?\s*(?:மற்றும்|அல்லது)\s*அதற்கு\s*(?:மேல்|மேற்பட்டவர்கள்|மேற்பட்ட|அதிகமானவர்கள்|அதிகமான)', q)
     )
     if m_gte:
         return {
@@ -329,8 +404,9 @@ def extract_age_filter(query_text: str) -> Optional[dict]:
 
     # 5. Greater than (>) (e.g. "above 60", "over 60", "older than 60", "> 60")
     m_gt = (
-        re.search(r'\b(?:age|aged)?\s*(?:more\s+(?:than|then)|above|over|older\s+than|greater\s+than|>\s*)\s*(\d+)\b', q) or
-        re.search(r'(\d+)\s*(?:வயதுக்கு\s*மேற்பட்ட|வயதுக்கு\s*மேல்|வயதுக்கு\s*அதிகமான|வயதுக்கும்\s*மேற்பட்ட)', q)
+        re.search(r'\b(?:age|aged)?\s*(?:more\s+(?:than|then)|above|over|older\s+than|greater\s+than|>\s*)\s*(\d+)\b', q, re.IGNORECASE) or
+        re.search(r'(\d+)\s*(?:வயதுக்கு|வயதிற்கு|வயதுக்கும்|வயதிற்கும்|வயது|வயதின்)?\s*(?:மேற்பட்டவர்கள்|மேற்பட்டவர்கள்?|மேற்பட்ட|மேல்|மேலான|அதிகமானவர்கள்|அதிகமான|தாண்டியவர்கள்|தாண்டிய)(?:\s*உள்ளவர்கள்)?', q) or
+        re.search(r'(?:மேற்பட்டவர்கள்|மேற்பட்டவர்கள்?|மேற்பட்ட|மேல்|மேலான|அதிகமானவர்கள்|அதிகமான)\s*(\d+)\s*(?:வயதுக்கு|வயதிற்கு|வயது)?', q)
     )
     if m_gt:
         return {
@@ -342,10 +418,10 @@ def extract_age_filter(query_text: str) -> Optional[dict]:
 
     # 6. Exactly (=) (e.g. "exactly 20 years old", "age 20", "aged 20")
     m_eq = (
-        re.search(r'\b(?:exactly|aged?|age\s+is|age\s*=\s*)\s*(\d+)(?:\s*years?\s*old)?\b', q) or
-        re.search(r'\b(\d+)\s*years?\s*old\b', q) or
-        re.search(r'சரியாக\s*(\d+)\s*வயது', q) or
-        re.search(r'(\d+)\s*வயதுடைய', q)
+        re.search(r'\b(?:exactly|aged?|age\s+is|age\s*=\s*)\s*(\d+)(?:\s*years?\s*old)?\b', q, re.IGNORECASE) or
+        re.search(r'\b(\d+)\s*years?\s*old\b', q, re.IGNORECASE) or
+        re.search(r'சரியாக\s*(\d+)\s*(?:வயது|வயதிற்கு|வயதுக்கு)', q) or
+        re.search(r'(\d+)\s*(?:வயதுடையவர்கள்|வயதுடைய|வயதானவர்கள்|வயதான)', q)
     )
     if m_eq:
         return {
@@ -380,19 +456,19 @@ def format_age_filter_label(age_filter: dict, is_ta: bool = False) -> str:
     if not age_filter:
         return ""
     if "min" in age_filter and "max" in age_filter:
-        return f"{age_filter['min']} முதல் {age_filter['max']} வயது வரை" if is_ta else f"between {age_filter['min']} and {age_filter['max']} years old"
+        return f"{age_filter['min']} முதல் {age_filter['max']} வயது வரை உள்ளவர்கள்" if is_ta else f"between {age_filter['min']} and {age_filter['max']} years old"
     op = age_filter.get("operator", "=")
     val = age_filter.get("value", 0)
     if op == "<":
-        return f"{val} வயதுக்கு குறைவான" if is_ta else f"below {val} years old"
+        return f"{val} வயதுக்கு குறைவானவர்கள்" if is_ta else f"below {val} years old"
     elif op == "<=":
-        return f"{val} வயது மற்றும் அதற்கு கீழ்" if is_ta else f"{val} and below"
+        return f"{val} வயது மற்றும் அதற்கு கீழானவர்கள்" if is_ta else f"{val} and below"
     elif op == ">":
-        return f"{val} வயதுக்கு மேற்பட்ட" if is_ta else f"above {val} years old"
+        return f"{val} வயதிற்கு மேற்பட்டவர்கள்" if is_ta else f"above {val} years old"
     elif op == ">=":
-        return f"{val} வயது மற்றும் அதற்கு மேல்" if is_ta else f"{val} and above"
+        return f"{val} வயது மற்றும் அதற்கு மேற்பட்டவர்கள்" if is_ta else f"{val} and above"
     else:
-        return f"சரியாக {val} வயதுடைய" if is_ta else f"exactly {val} years old"
+        return f"சரியாக {val} வயதுடையவர்கள்" if is_ta else f"exactly {val} years old"
 
 
 def build_structured_query_plan(query_text: str, user_parish: str = None) -> Optional[dict]:
@@ -483,7 +559,7 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
     has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை']))
 
     # 6. Detect Member entity
-    has_member = bool(re.search(r'\b(?:members|parishioners|people|persons|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்']))
+    has_member = bool(re.search(r'\b(?:members|parishioners|people|persons|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்', 'நபர்கள்', 'நபர்']))
 
     # If neither count keyword nor statistical trigger nor age condition exists, return None
     if not (has_count_kw or age_filter_raw or has_bcc_wise or has_year_wise or (has_sacrament and year_filter)):
@@ -1533,10 +1609,12 @@ def handle_list_members(
 def handle_count_members(
     user_parish: str = None,
     user_diocese: str = None,
-    user_vicariate: str = None
+    user_vicariate: str = None,
+    language: str = "en"
 ) -> dict:
     """
     Directly queries and returns total count of authorized parish members.
+    Supports English and Tamil responses.
     """
     where_clauses = []
     params = []
@@ -1567,18 +1645,27 @@ def handle_count_members(
         }
 
     parish_label = user_parish or user_diocese or "your authorized jurisdiction"
-    reply = f"There are currently **{cnt}** registered members in {parish_label}."
+    if language == "ta":
+        reply = f"**{parish_label}** பங்கில் தற்போது மொத்தம் **{cnt}** பதிவு செய்யப்பட்ட உறுப்பினர்கள் உள்ளனர்."
+        sug_qs = [
+            "பங்கில் ஏதேனும் 10 உறுப்பினர்களைக் காட்டு",
+            "பங்கில் எத்தனை குடும்பங்கள் உள்ளன?",
+            "அன்பியம் வாரியாக உறுப்பினர்கள் விவரம்"
+        ]
+    else:
+        reply = f"There are currently **{cnt}** registered members in {parish_label}."
+        sug_qs = [
+            "List any 10 members in my parish",
+            "How many families are in my parish",
+            "Total registered families"
+        ]
     
     return {
         "reply": reply,
         "generated_sql": sql,
         "data": [{"total_members": cnt, "jurisdiction": parish_label}],
         "disambiguation": None,
-        "suggested_questions": [
-            "List any 10 members in my parish",
-            "How many families are in my parish",
-            "Total registered families"
-        ],
+        "suggested_questions": sug_qs,
         "query_id": -1
     }
 
@@ -1679,10 +1766,12 @@ def handle_list_families(
 def handle_count_families(
     user_parish: str = None,
     user_diocese: str = None,
-    user_vicariate: str = None
+    user_vicariate: str = None,
+    language: str = "en"
 ) -> dict:
     """
     Directly queries and returns total count of authorized registered families.
+    Supports English and Tamil responses.
     """
     where_clauses = []
     params = []
@@ -1713,18 +1802,27 @@ def handle_count_families(
         }
 
     parish_label = user_parish or user_diocese or "your authorized jurisdiction"
-    reply = f"There are currently **{cnt}** registered families in {parish_label}."
+    if language == "ta":
+        reply = f"**{parish_label}** பங்கில் தற்போது மொத்தம் **{cnt}** பதிவு செய்யப்பட்ட குடும்பங்கள் உள்ளன."
+        sug_qs = [
+            "பங்கில் ஏதேனும் 10 குடும்பங்களைக் காட்டு",
+            "பங்கில் ஏதேனும் 10 உறுப்பினர்களைக் காட்டு",
+            "பங்கில் உள்ள மொத்த உறுப்பினர்கள்"
+        ]
+    else:
+        reply = f"There are currently **{cnt}** registered families in {parish_label}."
+        sug_qs = [
+            "List any 10 families in my parish",
+            "List any 10 members in my parish",
+            "Total registered members"
+        ]
     
     return {
         "reply": reply,
         "generated_sql": sql,
         "data": [{"total_families": cnt, "jurisdiction": parish_label}],
         "disambiguation": None,
-        "suggested_questions": [
-            "List any 10 families in my parish",
-            "List any 10 members in my parish",
-            "Total registered members"
-        ],
+        "suggested_questions": sug_qs,
         "query_id": -1
     }
 
@@ -1900,6 +1998,10 @@ def execute_parish_statistics(
             "data": rows,
             "record_count": total_m,
             "suggested_questions": [
+                f"பங்கில் உள்ள மொத்த குடும்பங்கள் எத்தனை?",
+                "அன்பியம் வாரியாக உறுப்பினர்கள் விவரம்",
+                "பங்கில் உள்ள மொத்த உறுப்பினர்கள் எண்ணிக்கை"
+            ] if is_ta else [
                 f"What is the total number of families in {scope_name}?",
                 "How many members are in each BCC?",
                 f"How many baptisms happened in 2024?"
@@ -1951,7 +2053,7 @@ def execute_parish_statistics(
         age_label_ta = f" {format_age_filter_label(age_filter, is_ta=True)}" if age_filter else ""
 
         if is_ta:
-            reply = f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{cnt} {g_display_ta}**{age_label_ta} பதிவு செய்யப்பட்டுள்ளனர்.{age_coverage_note}"
+            reply = f"**{scope_name}** பங்கில்{anb_label_ta}{age_label_ta} மொத்தம் **{cnt} {g_display_ta}** பதிவு செய்யப்பட்டுள்ளனர்.{age_coverage_note}"
         else:
             reply = f"There are currently **{cnt} {g_display}** registered{age_label}{anb_label} in **{scope_name}**.{age_coverage_note}"
         return {
@@ -1960,6 +2062,10 @@ def execute_parish_statistics(
             "data": [{"Category": f"{target_g} ({scope_name})", "Age Filter": format_age_filter_label(age_filter) if age_filter else "All", "Count": cnt}],
             "record_count": cnt,
             "suggested_questions": [
+                "அன்பியம் வாரியாக உறுப்பினர்கள் விவரம்",
+                "பங்கில் உள்ள மொத்த உறுப்பினர்கள் எண்ணிக்கை",
+                "பங்கில் எத்தனை குடும்பங்கள் உள்ளன?"
+            ] if is_ta else [
                 "Give the gender-wise member count",
                 "How many members are in each BCC?",
                 "What is the total number of families?"
@@ -2003,7 +2109,7 @@ def execute_parish_statistics(
         age_label_ta = f" {format_age_filter_label(age_filter, is_ta=True)}"
 
         if is_ta:
-            reply = f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{cnt} உறுப்பினர்கள்**{age_label_ta} பதிவு செய்யப்பட்டுள்ளனர்.{age_coverage_note}"
+            reply = f"**{scope_name}** பங்கில்{anb_label_ta}{age_label_ta} மொத்தம் **{cnt} உறுப்பினர்கள்** பதிவு செய்யப்பட்டுள்ளனர்.{age_coverage_note}"
         else:
             reply = f"There are currently **{cnt} members** registered{age_label}{anb_label} in **{scope_name}**.{age_coverage_note}"
         return {
@@ -2012,6 +2118,10 @@ def execute_parish_statistics(
             "data": [{"Category": f"Members ({scope_name})", "Age Filter": format_age_filter_label(age_filter), "Count": cnt}],
             "record_count": cnt,
             "suggested_questions": [
+                "பங்கில் உள்ள மொத்த உறுப்பினர்கள் எண்ணிக்கை",
+                "அன்பியம் வாரியாக உறுப்பினர்கள் விவரம்",
+                "பாலின வாரியாக உறுப்பினர்கள் விவரம்"
+            ] if is_ta else [
                 "Give the gender-wise member count",
                 "How many members are in each BCC?",
                 "What is the total number of families?"
@@ -2066,6 +2176,10 @@ def execute_parish_statistics(
             "data": rows,
             "record_count": tot_members,
             "suggested_questions": [
+                "பாலின வாரியாக உறுப்பினர்கள் விவரம்",
+                "பங்கில் உள்ள மொத்த உறுப்பினர்கள் எண்ணிக்கை",
+                "பங்கில் எத்தனை குடும்பங்கள் உள்ளன?"
+            ] if is_ta else [
                 "Give the gender-wise member count",
                 "How many members are in our parish?",
                 "What is the total number of families?"
@@ -2074,11 +2188,11 @@ def execute_parish_statistics(
 
     # 5. Total Families (only when pure total family count is requested)
     if entity == "FAMILY" and not group_by and not anbiyam:
-        return handle_count_families(user_parish=user_parish, user_diocese=user_diocese)
+        return handle_count_families(user_parish=user_parish, user_diocese=user_diocese, language=language)
 
     # 6. Total Members (only when pure total member count is requested without filters)
     if entity == "MEMBER" and not group_by and not anbiyam and not age_filter and not gender_filter:
-        return handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
+        return handle_count_members(user_parish=user_parish, user_diocese=user_diocese, language=language)
 
     # 7. Sacrament Counts (e.g. Baptisms in 2024)
     if entity in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE", "SACRAMENT"):
@@ -2116,6 +2230,10 @@ def execute_parish_statistics(
             "data": [{"Category": f"{label} ({scope_name})", "Year": year or "All", "Count": cnt}],
             "record_count": cnt,
             "suggested_questions": [
+                f"{label_ta} விவரங்களை ஆண்டு வாரியாகக் காட்டு",
+                "பங்கில் உள்ள மொத்த உறுப்பினர்கள் எண்ணிக்கை",
+                "பங்கில் எத்தனை குடும்பங்கள் உள்ளன?"
+            ] if is_ta else [
                 f"Show {label.lower()} counts year-wise",
                 "How many members are in our parish?",
                 "What is the total number of families?"
@@ -2123,7 +2241,7 @@ def execute_parish_statistics(
         }
 
     # Fallback to general member count
-    return handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
+    return handle_count_members(user_parish=user_parish, user_diocese=user_diocese, language=language)
 
 
 PHONETIC_REPLACEMENTS = [
