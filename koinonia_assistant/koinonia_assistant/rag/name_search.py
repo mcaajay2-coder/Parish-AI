@@ -209,13 +209,30 @@ def validate_candidate_hard_constraints(candidate: dict, constraints: dict) -> t
             cand_display = cand_bcc or "Unassigned BCC"
             reasons.append(f"registered in '{cand_display}', not '{req_bcc}'")
 
-    # 2. Family Card Constraint (Rule 5)
+    # 2. Family Card & Register Constraints (Rule 5 & Strict Disambiguation)
     req_card = constraints.get("family_card")
     if req_card:
-        cand_card = (candidate.get("family_register_number") or candidate.get("family_card") or "").strip().upper()
+        cand_card = (candidate.get("family_card_number") or candidate.get("family_card") or "").strip().upper()
         norm_req_card = req_card.strip().upper()
         if cand_card != norm_req_card:
-            reasons.append(f"registered under family card '{cand_card}', not '{norm_req_card}'")
+            reasons.append(f"registered under family card '{cand_card or 'None'}', not '{norm_req_card}'")
+
+    req_reg = constraints.get("family_register_number")
+    if req_reg:
+        cand_reg = (candidate.get("family_register_number") or "").strip().upper()
+        norm_req_reg = req_reg.strip().upper()
+        if cand_reg != norm_req_reg:
+            reasons.append(f"registered under family register number '{cand_reg or 'None'}', not '{norm_req_reg}'")
+
+    req_code = constraints.get("family_code")
+    if req_code:
+        cand_card = (candidate.get("family_card_number") or candidate.get("family_card") or "").strip().upper()
+        cand_reg = (candidate.get("family_register_number") or "").strip().upper()
+        norm_code = req_code.strip().upper()
+        if cand_card != norm_code and cand_reg != norm_code:
+            card_disp = cand_card or "-"
+            reg_disp = cand_reg or "-"
+            reasons.append(f"registered under family card '{card_disp}' / register '{reg_disp}', not '{norm_code}'")
 
     # 3. Parish Constraint (Rule 15)
     req_parish = constraints.get("parish")
@@ -247,6 +264,9 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
         "person_name": None,
         "bcc": None,
         "family_card": None,
+        "family_register_number": None,
+        "family_code": None,
+        "identifier_type": None,
         "member_id": None,
         "parish": None,
         "year": None,
@@ -260,11 +280,50 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
 
     working_q = q
 
-    # 1. Family Card Constraint
-    m_card = re.search(r'\b(?:card[:\s]+|from\s+|in\s+|family\s*card[:\s]+)?([A-Z]{2,5}[/\-]\d{1,5})\b', working_q, re.IGNORECASE)
-    if m_card:
-        constraints["family_card"] = m_card.group(1).upper()
+    # 1. Family Card & Register Number Constraints (Strict Separation)
+    m_reg = re.search(
+        r'(?:with\s+|having\s+)?(?:family\s*register(?:\s*number|\s*no)?|register\s*(?:number|no)?|reg\s*(?:number|no)?|reg|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\u0baa\u0bcd\s*\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd|\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd)[:\s]+([A-Z]{2,5}[/\-]\d{1,5})\b',
+        working_q,
+        re.IGNORECASE
+    ) or re.search(
+        r'\b([A-Z]{2,5}[/\-]\d{1,5})\s*(?:family\s*register|register\s*(?:number|no)?|reg\s*no|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\u0baa\u0bcd\s*\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd|\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd)',
+        working_q,
+        re.IGNORECASE
+    )
+
+    m_card = re.search(
+        r'(?:with\s+|having\s+)?(?:family\s*card(?:\s*number|\s*no)?|card(?:\s*number|\s*no)?|card|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\s*\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?|\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?)[:\s]+([A-Z]{2,5}[/\-]\d{1,5})\b',
+        working_q,
+        re.IGNORECASE
+    ) or re.search(
+        r'\b([A-Z]{2,5}[/\-]\d{1,5})\s*(?:family\s*card|card(?:\s*no|\s*number)?|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\s*\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?|\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?)',
+        working_q,
+        re.IGNORECASE
+    )
+
+    m_generic = re.search(
+        r'\b(?:from\s+|in\s+|belonging\s+to\s+|with\s+)?([A-Z]{2,5}[/\-]\d{1,5})\b',
+        working_q,
+        re.IGNORECASE
+    )
+
+    if m_reg:
+        code = m_reg.group(1).upper()
+        constraints["family_register_number"] = code
+        constraints["identifier_type"] = "FAMILY_REGISTER_NUMBER"
+        working_q = working_q[:m_reg.start()] + " " + working_q[m_reg.end():]
+        working_q = re.sub(r'\s+', ' ', working_q).strip()
+    elif m_card:
+        code = m_card.group(1).upper()
+        constraints["family_card"] = code
+        constraints["identifier_type"] = "FAMILY_CARD"
         working_q = working_q[:m_card.start()] + " " + working_q[m_card.end():]
+        working_q = re.sub(r'\s+', ' ', working_q).strip()
+    elif m_generic:
+        code = m_generic.group(1).upper()
+        constraints["family_code"] = code
+        constraints["identifier_type"] = "GENERIC_FAMILY_CODE"
+        working_q = working_q[:m_generic.start()] + " " + working_q[m_generic.end():]
         working_q = re.sub(r'\s+', ' ', working_q).strip()
 
     # 2. BCC Constraint
@@ -362,9 +421,8 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
             from koinonia_assistant.rag.tamil_utils import extract_person_entity_from_multilingual_query
             ent = extract_person_entity_from_multilingual_query(clean_p)
             extracted_ta = ent.get("transliterated_name") or ent.get("original_name")
-            if extracted_ta:
-                constraints["person_name"] = extracted_ta
-                return constraints
+            constraints["person_name"] = extracted_ta if extracted_ta else None
+            return constraints
         except Exception:
             pass
 
@@ -1020,7 +1078,10 @@ def classify_query_intent(query_text: str) -> dict:
 
     # Form G: Short direct query
     if not pname and len(clean_no_id.split()) <= 5 and not any(w in clean_no_id.lower() for w in ['how', 'what', 'why', 'when', 'where', 'list', 'show', 'total', 'count']):
-        pname = clean_no_id
+        if any('\u0B80' <= ch <= '\u0BFF' for ch in clean_no_id):
+            pname = None
+        else:
+            pname = clean_no_id
 
     # Validation & stripping of any leftover generic/intent words while preserving single-letter surname initials
     if pname:
@@ -1909,6 +1970,7 @@ def resolve_member_and_family(
             m.fhc_date,
             m.cnf_date,
             m.mrg_date,
+            f.family_card_number,
             f.family_register_number,
             f.reference as family_name,
             f.parish_bcc_id as anbiyam,
@@ -1943,7 +2005,9 @@ def resolve_member_and_family(
         seen_member_ids.add(m.member_id)
         m.full_name = re.sub(r'\s+', ' ', m.full_name or '').strip()
         norm_full = normalize_name(m.full_name)
-        m_card = (m.family_register_number or '').strip().upper()
+        m.family_card_number = (m.get("family_card_number") or '').strip()
+        m.family_register_number = (m.get("family_register_number") or '').strip()
+        m_card = (m.family_card_number or m.family_register_number or '').strip().upper()
 
         score, category = compute_member_similarity(norm_query, norm_full)
         is_valid, reasons = validate_candidate_hard_constraints(m, constraints)
@@ -1985,8 +2049,17 @@ def resolve_member_and_family(
         if is_ta:
             reasons_ta = []
             for r in top_failed_reasons:
-                if "registered under family card" in r:
-                    reasons_ta.append(f"குடும்ப அட்டை எண் `{top_failed_m.family_register_number}` கீழ் பதிவு செய்யப்பட்டுள்ளார், `{constraints.get('family_card')}` அல்ல")
+                if " / register " in r:
+                    code_val = constraints.get("family_code") or constraints.get("family_card") or constraints.get("family_register_number")
+                    card_val = top_failed_m.get("family_card_number") or "-"
+                    reg_val = top_failed_m.get("family_register_number") or "-"
+                    reasons_ta.append(f"குடும்ப அட்டை `{card_val}` / பதிவு எண் `{reg_val}` கீழ் பதிவு செய்யப்பட்டுள்ளார், `{code_val}` அல்ல")
+                elif "registered under family card" in r:
+                    card_val = top_failed_m.get("family_card_number") or "-"
+                    reasons_ta.append(f"குடும்ப அட்டை எண் `{card_val}` கீழ் பதிவு செய்யப்பட்டுள்ளார், `{constraints.get('family_card')}` அல்ல")
+                elif "registered under family register number" in r:
+                    reg_val = top_failed_m.get("family_register_number") or "-"
+                    reasons_ta.append(f"குடும்பப் பதிவு எண் `{reg_val}` கீழ் பதிவு செய்யப்பட்டுள்ளார், `{constraints.get('family_register_number')}` அல்ல")
                 elif "registered in" in r and "not" in r:
                     reasons_ta.append(f"'{top_failed_m.anbiyam}' அன்பியத்தில் பதிவு செய்யப்பட்டுள்ளார், '{constraints.get('bcc')}' அன்பியத்தில் அல்ல")
                 else:
@@ -2242,7 +2315,7 @@ def fetch_full_family_bundle(family_id: str, parish_id: str = None) -> dict:
         "Family",
         family_id,
         [
-            "name", "family_register_number", "reference", "parish_bcc_id",
+            "name", "family_card_number", "family_register_number", "reference", "parish_bcc_id",
             "zone_id", "lang_community_id", "rite_id", "status", "active",
             "street", "city", "zip", "phone", "mobile", "email",
             "house_ownership", "is_civil_marriage", "is_church_marriage",
@@ -2251,7 +2324,8 @@ def fetch_full_family_bundle(family_id: str, parish_id: str = None) -> dict:
         as_dict=True
     ) or {}
 
-    card_no = fam.get("family_register_number") or family_id
+    card_no = fam.get("family_card_number") or fam.get("family_register_number") or family_id
+    reg_no = fam.get("family_register_number") or family_id
     parish = parish_id or fam.get("parish_id")
 
     if parish:
@@ -2465,7 +2539,8 @@ def build_family_sacrament_response(
     full_name = re.sub(r'\s+', ' ', str(raw_fn)).strip()
     parish = target_member.get("parish_id") or "Yelagiri Parish"
     fam = (fam_bundle.get("family") if fam_bundle else None) or {}
-    card_no = fam.get("family_register_number") or target_member.get("family_card") or target_member.get("family_id") or "N/A"
+    card_no = fam.get("family_card_number") or target_member.get("family_card_number") or target_member.get("family_card") or "N/A"
+    reg_no = fam.get("family_register_number") or target_member.get("family_register_number") or "N/A"
     members = (fam_bundle.get("members") if fam_bundle else None) or [target_member]
 
     if scope == "FAMILY_ALL_SACRAMENTS":
@@ -2702,7 +2777,8 @@ def render_scoped_response(
     full_name = re.sub(r'\s+', ' ', str(raw_fn)).strip()
     parish = target_member.get("parish_id") or "the parish"
     fam = (fam_bundle.get("family") if fam_bundle else None) or {}
-    card_no = fam.get("family_register_number") or target_member.get("family_register_number") or target_member.get("family_card") or target_member.get("family_id") or "N/A"
+    card_no = fam.get("family_card_number") or target_member.get("family_card_number") or target_member.get("family_card") or "N/A"
+    reg_no = fam.get("family_register_number") or target_member.get("family_register_number") or "N/A"
     anbiyam = target_member.get("anbiyam") or fam.get("parish_bcc_id") or ""
     members = (fam_bundle.get("members") if fam_bundle else None) or [target_member]
 
@@ -3037,8 +3113,9 @@ def render_scoped_response(
 
         if is_ta:
             lines = [
-                f"### 🏠 குடும்ப விவரம்: {card_no}",
-                f"- **குடும்ப அட்டை எண்:** `{card_no}`",
+                f"### 🏠 குடும்ப விவரம்: {fam_name}",
+                f"- **குடும்ப அட்டை எண் (Card No):** `{card_no}`",
+                f"- **குடும்பப் பதிவு எண் (Register No):** `{reg_no}`",
                 f"- **குடும்பப் பெயர்:** {fam_name}",
                 f"- **குடும்பத் தலைவர்:** {family_head}",
                 f"- **அன்பியம் (BCC):** {anbiyam}",
@@ -3051,8 +3128,9 @@ def render_scoped_response(
             ]
         else:
             lines = [
-                f"### 🏠 FAMILY: {card_no}",
-                f"- **Family Card Number:** `{card_no}`",
+                f"### 🏠 FAMILY: {fam_name}",
+                f"- **Family Card No:** `{card_no}`",
+                f"- **Family Register No:** `{reg_no}`",
                 f"- **Family Name:** {fam_name}",
                 f"- **Family Head:** {family_head}",
                 f"- **BCC / Anbiyam:** {anbiyam}",
@@ -3091,7 +3169,8 @@ def render_scoped_response(
         if is_ta:
             lines = [
                 f"### 👤 பங்கு உறுப்பினர்: {full_name}",
-                f"- **குடும்ப அட்டை எண்:** `{card_no}`",
+                f"- **குடும்ப அட்டை எண் (Card No):** `{card_no}`",
+                f"- **குடும்பப் பதிவு எண் (Register No):** `{reg_no}`",
                 f"- **அன்பியம் (BCC):** {bcc_name}",
                 f"- **பங்கு:** {parish}",
                 f"- **தொடர்பு எண்:** {mob}",
@@ -3106,6 +3185,7 @@ def render_scoped_response(
             lines = [
                 f"### 👤 Parishioner: {full_name}",
                 f"- **Family Card No:** `{card_no}`",
+                f"- **Family Register No:** `{reg_no}`",
                 f"- **BCC / Anbiyam:** {bcc_name}",
                 f"- **Parish:** {parish}",
                 f"- **Contact:** {mob}",

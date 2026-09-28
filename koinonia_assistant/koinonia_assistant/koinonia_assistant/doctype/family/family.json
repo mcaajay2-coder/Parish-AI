@@ -97,6 +97,11 @@
    "label": "Family Register Number"
   },
   {
+   "fieldname": "family_card_number",
+   "fieldtype": "Data",
+   "label": "Family Card Number"
+  },
+  {
    "fieldname": "diocese_id",
    "fieldtype": "Data",
    "label": "Diocese Id"

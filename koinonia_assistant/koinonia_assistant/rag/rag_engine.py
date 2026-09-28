@@ -1201,7 +1201,8 @@ ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father',
             else:
                 det_sql = f"""SELECT 
     f.reference AS `Family Name / Head`,
-    f.family_register_number AS `Family Card Number`,
+    f.family_card_number AS `Family Card Number`,
+    f.family_register_number AS `Family Register Number`,
     f.street AS `Address / Street`,
     f.mobile AS `Family Contact`,
     CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
@@ -1940,6 +1941,94 @@ def database_lookup_node(state: GraphState) -> GraphState:
             "suggested_questions": res.get("suggested_questions", []),
         }
 
+    # 1. Family Card / Register Number Lookup (Strict Separation)
+    reg_match = re.search(
+        r'(?:with\s+|having\s+)?(?:family\s*register(?:\s*number|\s*no)?|register\s*(?:number|no)?|reg\s*(?:number|no)?|reg|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\u0baa\u0bcd\s*\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd|\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd)[:\s]+([A-Z]{2,5}[/\-]\d{1,5})\b',
+        question,
+        re.IGNORECASE
+    ) or re.search(
+        r'\b([A-Z]{2,5}[/\-]\d{1,5})\s*(?:family\s*register|register\s*(?:number|no)?|reg\s*no|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\u0baa\u0bcd\s*\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd|\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd)',
+        question,
+        re.IGNORECASE
+    )
+
+    card_match = re.search(
+        r'(?:with\s+|having\s+)?(?:family\s*card(?:\s*number|\s*no)?|card(?:\s*number|\s*no)?|card|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\s*\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?|\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?)[:\s]+([A-Z]{2,5}[/\-]\d{1,5})\b',
+        question,
+        re.IGNORECASE
+    ) or re.search(
+        r'\b([A-Z]{2,5}[/\-]\d{1,5})\s*(?:family\s*card|card(?:\s*no|\s*number)?|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\s*\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?|\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?)',
+        question,
+        re.IGNORECASE
+    )
+
+    generic_code_match = re.search(r"\b([A-Z]{2,5}[/\-]\d{1,5})\b", question, re.IGNORECASE)
+    has_person_in_query = bool(classify_query_intent(question).get("person_name"))
+    matched_id = reg_match or card_match or generic_code_match
+
+    if matched_id and not has_person_in_query:
+        ensure_frappe_connected()
+        import frappe
+        code_val = matched_id.group(1).upper()
+
+        if reg_match:
+            where_f = ["UPPER(family_register_number) = %s"]
+            params_f: List[Any] = [code_val]
+            desc_en = f"family register `{code_val}`"
+            desc_ta = f"`{code_val}` என்ற குடும்பப் பதிவு எண்"
+        elif card_match:
+            where_f = ["UPPER(family_card_number) = %s"]
+            params_f: List[Any] = [code_val]
+            desc_en = f"family card `{code_val}`"
+            desc_ta = f"`{code_val}` என்ற குடும்ப அட்டை"
+        else:
+            where_f = ["(UPPER(family_card_number) = %s OR UPPER(family_register_number) = %s)"]
+            params_f: List[Any] = [code_val, code_val]
+            desc_en = f"`{code_val}`"
+            desc_ta = f"`{code_val}` என்ற குடும்ப எண்"
+
+        if scope_type == "PARISH" and user_parish:
+            where_f.append("(parish_id = %s OR parish_id LIKE %s)")
+            params_f.extend([user_parish, f"%{user_parish}%"])
+
+        fam_rows = frappe.db.sql(
+            f"SELECT name, parish_id, family_card_number, family_register_number, reference FROM `tabFamily` WHERE {' AND '.join(where_f)} LIMIT 1",
+            tuple(params_f),
+            as_dict=True,
+        )
+        if not fam_rows:
+            msg = (
+                f"உங்கள் அனுமதிக்கப்பட்ட பங்கு எல்லையில் (**{scope_name}**) {desc_ta} விவரம் எதுவும் கண்டறியப்படவில்லை."
+                if is_ta
+                else f"No family record matching {desc_en} is available within your authorized parish scope (**{scope_name}**)."
+            )
+            return {
+                **state,
+                "route": "handled",
+                "deterministic_reply": msg,
+                "generated_sql": "",
+                "sql_result": [],
+                "sql_validation_result": "BLOCKED_UNAUTHORIZED_FAMILY_CARD",
+                "authorized_record_count": 0,
+                "suggested_questions": [],
+            }
+        fid = fam_rows[0]["name"]
+        bundle = fetch_full_family_bundle(fid, user_parish)
+        if bundle.get("family"):
+            scope = determine_response_scope(question)
+            head_mem = bundle.get("members", [{}])[0] if bundle.get("members") else {}
+            reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
+            return {
+                **state,
+                "route": "handled",
+                "deterministic_reply": reply,
+                "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}' AND parish_id = '{user_parish or ''}'",
+                "sql_result": bundle.get("members", []),
+                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
+                "authorized_record_count": len(bundle.get("members", [])),
+                "suggested_questions": suggestions,
+            }
+
     # 1. Qualified Member Sacrament List (e.g. "List any 10 members who got 3 Sacrements")
     if c_intent == "LIST" and intent_info.get("sub_intent") == "QUALIFIED_MEMBER_SACRAMENT_LIST":
         ensure_frappe_connected()
@@ -2079,55 +2168,7 @@ def database_lookup_node(state: GraphState) -> GraphState:
                 ],
             }
 
-    # 4. Family Card Lookup (Sections 64 & 67: Verify card belongs to authorized parish BEFORE retrieving members)
-    card_match = re.search(r"\b([A-Z]{2,5}/\d{1,5})\b", question, re.IGNORECASE)
-    has_person_in_query = bool(classify_query_intent(question).get("person_name"))
-    if card_match and not has_person_in_query:
-        ensure_frappe_connected()
-        import frappe
-        card_code = card_match.group(1).upper()
-        where_f = ["UPPER(family_register_number) = %s"]
-        params_f: List[Any] = [card_code]
-        if scope_type == "PARISH" and user_parish:
-            where_f.append("(parish_id = %s OR parish_id LIKE %s)")
-            params_f.extend([user_parish, f"%{user_parish}%"])
-        fam_rows = frappe.db.sql(
-            f"SELECT name, parish_id, family_register_number, reference FROM `tabFamily` WHERE {' AND '.join(where_f)} LIMIT 1",
-            tuple(params_f),
-            as_dict=True,
-        )
-        if not fam_rows:
-            msg = (
-                f"உங்கள் அனுமதிக்கப்பட்ட பங்கு எல்லையில் (**{scope_name}**) `{card_code}` என்ற குடும்ப அட்டை விவரம் எதுவும் கண்டறியப்படவில்லை."
-                if is_ta
-                else f"No family record matching `{card_code}` is available within your authorized parish scope (**{scope_name}**)."
-            )
-            return {
-                **state,
-                "route": "handled",
-                "deterministic_reply": msg,
-                "generated_sql": "",
-                "sql_result": [],
-                "sql_validation_result": "BLOCKED_UNAUTHORIZED_FAMILY_CARD",
-                "authorized_record_count": 0,
-                "suggested_questions": [],
-            }
-        fid = fam_rows[0]["name"]
-        bundle = fetch_full_family_bundle(fid, user_parish)
-        if bundle.get("family"):
-            scope = determine_response_scope(question)
-            head_mem = bundle.get("members", [{}])[0] if bundle.get("members") else {}
-            reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
-            return {
-                **state,
-                "route": "handled",
-                "deterministic_reply": reply,
-                "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}' AND parish_id = '{user_parish or ''}'",
-                "sql_result": bundle.get("members", []),
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(bundle.get("members", [])),
-                "suggested_questions": suggestions,
-            }
+
 
     # 5. Explicit ID or 3-Level Member / Family / Sacrament Resolution
     fam_id_match = re.search(r'\b(?:Family\s*ID|Family)[:\s]+([0-9]+)\b', question, re.IGNORECASE) or re.search(r'\bFAM-([0-9A-Z\-]+)\b', question, re.IGNORECASE)

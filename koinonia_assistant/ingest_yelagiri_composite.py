@@ -64,15 +64,17 @@ def run_ingestion():
 
     for fam_id, member_rows in family_rows_by_id.items():
         first_row = member_rows[0]
-        fam_doc_name = fam_id
-        card_no = first_row.get("family_card_number", "").strip() or fam_id
+        card_no = first_row.get("family_card_number", "").strip() or None
+        reg_no = first_row.get("register_number", "").strip() or None
+        fam_name = first_row.get("family_name", "").strip() or card_no or fam_id
 
         # Insert tabFamily doc
         fam_doc = frappe.get_doc({
             "doctype": "Family",
             "name": fam_doc_name,
-            "family_register_number": card_no,
-            "reference": card_no,
+            "family_card_number": card_no,
+            "family_register_number": reg_no,
+            "reference": fam_name,
             "parish_bcc_id": first_row.get("basic_christian_community", "").strip(),
             "zone_id": first_row.get("zone_id", "").strip(),
             "lang_community_id": first_row.get("language_community_id", "").strip(),
