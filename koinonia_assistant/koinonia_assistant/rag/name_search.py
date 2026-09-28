@@ -245,6 +245,393 @@ def validate_candidate_hard_constraints(candidate: dict, constraints: dict) -> t
     is_valid = (len(reasons) == 0)
     return is_valid, reasons
 
+
+# =============================================================================
+# STRICT FILTER / CONDITION PRESERVATION FOR STATISTICS QUERIES (Sections 1-13)
+# =============================================================================
+
+def extract_age_filter(query_text: str) -> Optional[dict]:
+    """
+    Extracts and standardizes natural language age filters, comparison operators,
+    exact values, and ranges (Sections 1, 2, 3):
+    - "members age less than 20", "below 20", "under 20", "younger than 20" -> {"operator": "<", "value": 20}
+    - "18 and below", "18 and under", "<= 18" -> {"operator": "<=", "value": 18}
+    - "above 60", "over 60", "older than 60", "> 60" -> {"operator": ">", "value": 60}
+    - "60 and above", "60 and over", ">= 60" -> {"operator": ">=", "value": 60}
+    - "exactly 20 years old", "age 20", "aged 20" -> {"operator": "=", "value": 20}
+    - "between 20 and 40", "age 20 to 40", "members aged 20-40" -> {"min": 20, "max": 40}
+    - Full Tamil age expressions support
+    """
+    if not query_text:
+        return None
+    q = query_text.lower().strip()
+
+    # 1. Range Patterns (e.g. "between 20 and 40", "age 20 to 40", "members aged 20-40")
+    m_range = (
+        re.search(r'\bbetween\s+(\d+)\s+(?:and|to|-)\s+(\d+)\b', q) or
+        re.search(r'\b(?:age|aged)\s+(\d+)\s*(?:to|-)\s*(\d+)\b', q) or
+        re.search(r'\b(?:from\s+)?(\d+)\s*(?:to|-)\s*(\d+)\s*(?:years?\s*old|years?|age)?\b', q) or
+        re.search(r'(\d+)\s*(?:முதல்|-)\s*(\d+)\s*(?:வயது\s*வரை|வரை|வயதுக்குள்)', q)
+    )
+    if m_range:
+        v1 = int(m_range.group(1))
+        v2 = int(m_range.group(2))
+        min_v, max_v = min(v1, v2), max(v1, v2)
+        return {
+            "type": "range",
+            "min": min_v,
+            "max": max_v,
+            "raw": m_range.group(0)
+        }
+
+    # 2. Less than or equal to (<=) (e.g. "18 and below", "18 and under", "<= 18")
+    m_lte = (
+        re.search(r'\b(\d+)\s*(?:years?\s*old\s+)?(?:and\s+below|and\s+under|or\s+below|or\s+under)\b', q) or
+        re.search(r'<=\s*(\d+)', q) or
+        re.search(r'\b(?:at\s+most|maximum\s+of|up\s+to)\s+(\d+)\b', q) or
+        re.search(r'(\d+)\s*(?:வயது\s*மற்றும்\s*அதற்கு\s*கீழ்|வயது\s*மற்றும்\s*அதற்கு\s*குறைவான)', q)
+    )
+    if m_lte:
+        return {
+            "type": "comparison",
+            "operator": "<=",
+            "value": int(m_lte.group(1)),
+            "raw": m_lte.group(0)
+        }
+
+    # 3. Less than (<) (e.g. "age less than 20", "age less then 20", "below 20", "under 20", "younger than 20", "< 20")
+    m_lt = (
+        re.search(r'\b(?:age|aged)?\s*(?:less\s+(?:than|then)|below|under|younger\s+than|<\s*)\s*(\d+)\b', q) or
+        re.search(r'(\d+)\s*(?:வயதுக்கு\s*குறைவான|வயதுக்கு\s*குறைந்த|வயதுக்கு\s*கீழ்|வயதுக்கு\s*உட்பட்ட|வயதுக்கும்\s*குறைவான)', q)
+    )
+    if m_lt:
+        return {
+            "type": "comparison",
+            "operator": "<",
+            "value": int(m_lt.group(1)),
+            "raw": m_lt.group(0)
+        }
+
+    # 4. Greater than or equal to (>=) (e.g. "60 and above", "60 and over", ">= 60")
+    m_gte = (
+        re.search(r'\b(\d+)\s*(?:years?\s*old\s+)?(?:and\s+above|and\s+over|or\s+above|or\s+over|and\s+older)\b', q) or
+        re.search(r'>=\s*(\d+)', q) or
+        re.search(r'\b(?:at\s+least|minimum\s+of)\s+(\d+)\b', q) or
+        re.search(r'(\d+)\s*(?:வயது\s*மற்றும்\s*அதற்கு\s*மேல்|வயது\s*மற்றும்\s*அதற்கு\s*அதிகமான)', q)
+    )
+    if m_gte:
+        return {
+            "type": "comparison",
+            "operator": ">=",
+            "value": int(m_gte.group(1)),
+            "raw": m_gte.group(0)
+        }
+
+    # 5. Greater than (>) (e.g. "above 60", "over 60", "older than 60", "> 60")
+    m_gt = (
+        re.search(r'\b(?:age|aged)?\s*(?:more\s+(?:than|then)|above|over|older\s+than|greater\s+than|>\s*)\s*(\d+)\b', q) or
+        re.search(r'(\d+)\s*(?:வயதுக்கு\s*மேற்பட்ட|வயதுக்கு\s*மேல்|வயதுக்கு\s*அதிகமான|வயதுக்கும்\s*மேற்பட்ட)', q)
+    )
+    if m_gt:
+        return {
+            "type": "comparison",
+            "operator": ">",
+            "value": int(m_gt.group(1)),
+            "raw": m_gt.group(0)
+        }
+
+    # 6. Exactly (=) (e.g. "exactly 20 years old", "age 20", "aged 20")
+    m_eq = (
+        re.search(r'\b(?:exactly|aged?|age\s+is|age\s*=\s*)\s*(\d+)(?:\s*years?\s*old)?\b', q) or
+        re.search(r'\b(\d+)\s*years?\s*old\b', q) or
+        re.search(r'சரியாக\s*(\d+)\s*வயது', q) or
+        re.search(r'(\d+)\s*வயதுடைய', q)
+    )
+    if m_eq:
+        return {
+            "type": "comparison",
+            "operator": "=",
+            "value": int(m_eq.group(1)),
+            "raw": m_eq.group(0)
+        }
+
+    return None
+
+
+def build_sql_age_expression(age_filter: dict, col_name: str = "m.age", dob_col: str = "m.dob") -> str:
+    """
+    Constructs approved SQL expression for age calculation per Section 10:
+    COALESCE(NULLIF(m.age, 0), TIMESTAMPDIFF(YEAR, m.dob, CURDATE()))
+    """
+    if not age_filter:
+        return "1=1"
+    age_calc = f"COALESCE(NULLIF({col_name}, 0), TIMESTAMPDIFF(YEAR, {dob_col}, CURDATE()))"
+    if "min" in age_filter and "max" in age_filter:
+        return f"({age_calc} >= {int(age_filter['min'])} AND {age_calc} <= {int(age_filter['max'])})"
+    op = age_filter.get("operator", "=")
+    val = int(age_filter.get("value", 0))
+    if op not in ("<", "<=", ">", ">=", "="):
+        op = "="
+    return f"({age_calc} {op} {val})"
+
+
+def format_age_filter_label(age_filter: dict, is_ta: bool = False) -> str:
+    """Formats human-readable age filter descriptions for replies and tables."""
+    if not age_filter:
+        return ""
+    if "min" in age_filter and "max" in age_filter:
+        return f"{age_filter['min']} முதல் {age_filter['max']} வயது வரை" if is_ta else f"between {age_filter['min']} and {age_filter['max']} years old"
+    op = age_filter.get("operator", "=")
+    val = age_filter.get("value", 0)
+    if op == "<":
+        return f"{val} வயதுக்கு குறைவான" if is_ta else f"below {val} years old"
+    elif op == "<=":
+        return f"{val} வயது மற்றும் அதற்கு கீழ்" if is_ta else f"{val} and below"
+    elif op == ">":
+        return f"{val} வயதுக்கு மேற்பட்ட" if is_ta else f"above {val} years old"
+    elif op == ">=":
+        return f"{val} வயது மற்றும் அதற்கு மேல்" if is_ta else f"{val} and above"
+    else:
+        return f"சரியாக {val} வயதுடைய" if is_ta else f"exactly {val} years old"
+
+
+def build_structured_query_plan(query_text: str, user_parish: str = None) -> Optional[dict]:
+    """
+    Converts user statistics query into a formal structured query plan before SQL generation (Section 11).
+    Preserves:
+    - entity_type: MEMBER, FAMILY, BAPTISM, etc.
+    - metric: COUNT
+    - filters:
+        - age: {operator, value} or {min, max}
+        - gender: FEMALE / MALE (if filtered)
+        - anbiyam: canonical BCC name (if filtered)
+        - year: integer year (if filtered)
+    - group_by: GENDER / BCC / YEAR / None
+    - target_scope: AUTHORIZED_PARISH
+    - person_entity_detected: False
+    """
+    if not query_text:
+        return None
+    q = query_text.lower().strip()
+    q_clean = re.sub(r'[\?!]+$', '', q).strip()
+
+    # Guard: Individual person family count query like "Antony Selvan's family" or "in Antony Selvan's family"
+    m_person_fam = re.search(r"\b(?:of|for|in|about)\s+([A-Za-z\s]+?)(?:'s|’s)\s+(?:family\s+members?|family|household)\b", q_clean)
+    if m_person_fam:
+        name_seg = m_person_fam.group(1).strip().lower()
+        if name_seg not in ('women', 'men', 'woman', 'man', 'our', 'the', 'my'):
+            return None
+
+    # Guard: Tamil individual person family query e.g. "அந்தோணி செல்வன் குடும்பத்தில் எத்தனை பேர்"
+    if 'குடும்பத்தில்' in q_clean or 'குடும்பத்தின்' in q_clean or 'குடும்பம்' in q_clean:
+        words = q_clean.split()
+        if len(words) >= 2:
+            first_w = words[0]
+            if first_w not in ('பங்கில்', 'எங்கள்', 'நமது', 'மொத்த', 'எத்தனை', 'இந்த'):
+                m_p = re.search(r'^\s*([^\s]+(?:\s+[^\s]+)?)\s+(?:குடும்பத்தில்|குடும்பத்தின்|குடும்பம்)', q_clean)
+                if m_p:
+                    cand = m_p.group(1)
+                    if cand not in ('பங்கு', 'பங்கில்', 'மொத்த', 'எத்தனை', 'அனைத்து'):
+                        if any(k in q_clean for k in ['எத்தனை பேர்', 'உறுப்பினர்கள் யார்', 'விவரம்']):
+                            return None
+
+    # 1. Detect Statistical / Aggregate intent keywords OR age expressions
+    has_count_kw = bool(re.search(
+        r'\b(?:how\s+many|number\s+of|count\s+of|count|total\s+number|total\s+count|total|how\s+much|breakdown|distribution|ratio|percentage|statistics|stats|summary)\b',
+        q_clean
+    ) or any(k in q_clean for k in ['எத்தனை', 'மொத்தம்', 'எண்ணிக்கை', 'புள்ளிவிவரம்', 'விகிதம்', 'பகிர்வு', 'கூட்டுத்தொகை', 'வாரியாக']))
+
+    age_filter_raw = extract_age_filter(query_text)
+
+    has_year_wise = bool(re.search(r'\b(?:year[\s\-]*wise|by\s+year|yearly|each\s+year|annual|annually)\b', q_clean) or 'ஆண்டு வாரியாக' in q_clean)
+
+    # 2. Detect Gender dimension
+    has_women = bool(re.search(r"\b(?:women|woman|female|females|girls|girl|women's|womens)\b", q_clean) or any(k in q_clean for k in ['பெண்கள்', 'பெண்', 'சிறுமிகள்']))
+    has_men = bool(re.search(r"\b(?:men|man|male|males|boys|boy|men's|mens)\b", q_clean) or any(k in q_clean for k in ['ஆண்கள்', 'ஆண்', 'சிறுவர்கள்']))
+    has_both_gender = (has_women and has_men) or bool(re.search(r'\b(?:men\s+and\s+women|male\s+and\s+female|boys\s+and\s+girls|gender[\s\-]*wise|by\s+gender|gender\s+count|gender\s+breakdown|gender)\b', q_clean) or 'பாலின வாரியாக' in q_clean or 'பாலினம்' in q_clean or ('ஆண்கள்' in q_clean and 'பெண்கள்' in q_clean))
+
+    # 3. Detect BCC / Anbiyam dimension
+    has_bcc_wise = bool(re.search(r'\b(?:in\s+each\s+bcc|in\s+each\s+anbiyam|each\s+bcc|each\s+anbiyam|bcc[\s\-]*wise|anbiyam[\s\-]*wise|per\s+bcc|per\s+anbiyam|by\s+bcc|by\s+anbiyam|every\s+bcc|every\s+anbiyam)\b', q_clean) or any(k in q_clean for k in ['அன்பிய வாரியாக', 'ஒவ்வொரு அன்பியத்திலும்', 'அன்பியம் வாரியாக']))
+    anbiyam_filter = None
+    if not has_bcc_wise:
+        m_anb = re.search(r"\b(?:in|at|of|for)\s+([A-Za-z0-9\s\.\'\"]+?)\s+(?:anbiyam|bcc)\b", q_clean)
+        if m_anb:
+            cand = m_anb.group(1).strip()
+            cand_clean = re.sub(r'^(?:the|a|an)\s+', '', cand, flags=re.IGNORECASE).strip()
+            if cand_clean and cand_clean.lower() not in ('each', 'every', 'all', 'our', 'this'):
+                anbiyam_filter = cand_clean
+        else:
+            m_ta_anb = re.search(r'([\u0B80-\u0BFF\s]+?)\s+(?:அன்பியத்தில்|அன்பியத்தின்|அன்பியம்)', q_clean)
+            if m_ta_anb:
+                cand_ta = m_ta_anb.group(1).strip()
+                cand_ta_clean = re.sub(r'^(?:ஒவ்வொரு|அனைத்து|எங்கள்|நமது)\s+', '', cand_ta).strip()
+                if cand_ta_clean:
+                    anbiyam_filter = cand_ta_clean
+
+    # 4. Detect Sacrament dimension
+    has_baptism = bool(re.search(r'\b(?:baptism|baptisms|baptised|baptized)\b', q_clean) or any(k in q_clean for k in ['திருமுழுக்கு', 'ஞானஸ்நானம்']))
+    has_communion = bool(re.search(r'\b(?:communion|first\s+holy\s+communion|fhc)\b', q_clean) or any(k in q_clean for k in ['முதல் நற்கருணை', 'நற்கருணை', 'புதுநன்மை']))
+    has_confirmation = bool(re.search(r'\b(?:confirmation|confirmations)\b', q_clean) or any(k in q_clean for k in ['உறுதிப்பூசுதல்', 'உறுதிபூசுதல்']))
+    has_marriage = bool(re.search(r'\b(?:marriage|marriages|wedding|weddings)\b', q_clean) or any(k in q_clean for k in ['திருமணம்', 'விவாகம்']))
+    has_sacrament = has_baptism or has_communion or has_confirmation or has_marriage or bool(re.search(r'\b(?:sacraments?|sacrements?)\b', q_clean) or 'அருட்சாதன' in q_clean or 'திருவருட்சாதன' in q_clean)
+
+    # Detect Year filter
+    m_yr = re.search(r'\b(19\d\d|20\d\d)\b', q_clean)
+    year_filter = int(m_yr.group(1)) if m_yr else None
+
+    # 5. Detect Family entity
+    has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை']))
+
+    # 6. Detect Member entity
+    has_member = bool(re.search(r'\b(?:members|parishioners|people|persons|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்']))
+
+    # If neither count keyword nor statistical trigger nor age condition exists, return None
+    if not (has_count_kw or age_filter_raw or has_bcc_wise or has_year_wise or (has_sacrament and year_filter)):
+        return None
+
+    # Determine Entity
+    if has_sacrament:
+        entity = 'BAPTISM' if has_baptism else ('COMMUNION' if has_communion else ('CONFIRMATION' if has_confirmation else ('MARRIAGE' if has_marriage else 'SACRAMENT')))
+        intent = 'SACRAMENT_STATISTICS'
+    elif has_family and not has_member and not age_filter_raw and not has_women and not has_men:
+        entity = 'FAMILY'
+        intent = 'FAMILY_STATISTICS'
+    else:
+        entity = 'MEMBER'
+        intent = 'MEMBER_STATISTICS'
+
+    # Build Filters dict (Section 11 format)
+    filters = {}
+    if age_filter_raw:
+        if age_filter_raw["type"] == "range":
+            filters["age"] = {"min": age_filter_raw["min"], "max": age_filter_raw["max"]}
+        else:
+            filters["age"] = {"operator": age_filter_raw["operator"], "value": age_filter_raw["value"]}
+
+    # Group by & Filter assignments
+    group_by = None
+    if has_both_gender:
+        group_by = 'GENDER'
+    elif has_women:
+        filters["gender"] = 'FEMALE'
+    elif has_men:
+        filters["gender"] = 'MALE'
+
+    if has_bcc_wise:
+        group_by = 'BCC'
+    elif anbiyam_filter:
+        filters["anbiyam"] = anbiyam_filter
+
+    if has_year_wise:
+        group_by = 'YEAR'
+    elif year_filter:
+        filters["year"] = year_filter
+
+    return {
+        "is_statistical": True,
+        "intent": intent,
+        "entity_type": entity,
+        "entity": entity,
+        "metric": "COUNT",
+        "filters": filters,
+        "group_by": group_by,
+        "target_scope": "AUTHORIZED_PARISH",
+        "scope": "AUTHORIZED_PARISH",
+        "person_entity_detected": False,
+        "person_name": None,
+        # Backward compatibility aliases for existing helpers
+        "gender": ['FEMALE', 'MALE'] if group_by == 'GENDER' else ([filters['gender']] if 'gender' in filters else None),
+        "anbiyam": filters.get('anbiyam'),
+        "year": filters.get('year'),
+        "age": filters.get('age')
+    }
+
+
+def validate_structured_query_plan(query_text: str, query_plan: dict) -> Tuple[bool, Optional[str]]:
+    """
+    CRITICAL FILTER PRESERVATION RULE (Sections 6 & 12):
+    Before SQL generation, compares original user question with structured query plan.
+    Every explicit user constraint must appear in the query plan:
+    - Age conditions (comparison operator, value, range)
+    - Gender condition / grouping
+    - BCC / Anbiyam condition / grouping
+    - Year condition / grouping
+    - Target scope must be AUTHORIZED_PARISH
+    - person_entity_detected must be False
+    If ANY explicit condition is missing: returns (False, reason) and SQL MUST NOT execute.
+    """
+    if not query_plan:
+        return False, "Query plan is None or empty."
+
+    q = query_text.lower().strip()
+    filters = query_plan.get("filters", {})
+    group_by = query_plan.get("group_by")
+
+    # 1. Age condition verification (Section 6 & 12)
+    extracted_age = extract_age_filter(query_text)
+    if extracted_age:
+        plan_age = filters.get("age")
+        if not plan_age:
+            return False, f"Original query contains explicit age filter '{extracted_age.get('raw')}', but query plan dropped it."
+        
+        if extracted_age["type"] == "range":
+            if plan_age.get("min") != extracted_age["min"] or plan_age.get("max") != extracted_age["max"]:
+                return False, f"Age range mismatch: expected {extracted_age['min']}-{extracted_age['max']}, got {plan_age}."
+        else:
+            if plan_age.get("operator") != extracted_age["operator"] or plan_age.get("value") != extracted_age["value"]:
+                return False, f"Age comparison mismatch: expected {extracted_age['operator']} {extracted_age['value']}, got {plan_age}."
+
+    # 2. Gender condition / grouping verification
+    has_women = bool(re.search(r"\b(?:women|woman|female|females|girls|girl|women's|womens)\b", q) or any(k in q for k in ['பெண்கள்', 'பெண்', 'சிறுமிகள்']))
+    has_men = bool(re.search(r"\b(?:men|man|male|males|boys|boy|men's|mens)\b", q) or any(k in q for k in ['ஆண்கள்', 'ஆண்', 'சிறுவர்கள்']))
+    has_both_gender = (has_women and has_men) or bool(re.search(r'\b(?:men\s+and\s+women|male\s+and\s+female|gender[\s\-]*wise|by\s+gender)\b', q) or 'பாலின வாரியாக' in q or ('ஆண்கள்' in q and 'பெண்கள்' in q))
+
+    if has_both_gender:
+        if group_by != "GENDER":
+            return False, "Original query requested both men and women / gender breakdown, but query plan dropped group_by='GENDER'."
+    elif has_women:
+        if filters.get("gender") != "FEMALE":
+            return False, "Original query requested female members, but query plan dropped gender='FEMALE'."
+    elif has_men:
+        if filters.get("gender") != "MALE":
+            return False, "Original query requested male members, but query plan dropped gender='MALE'."
+
+    # 3. Scope verification
+    if query_plan.get("target_scope") != "AUTHORIZED_PARISH":
+        return False, "Target scope must be strictly 'AUTHORIZED_PARISH'."
+
+    # 4. Person resolution verification (Section 8)
+    if query_plan.get("person_entity_detected"):
+        return False, "Statistical queries must not detect person entities or invoke person resolution."
+
+    return True, None
+
+
+def detect_statistical_query(query_text: str) -> Optional[dict]:
+    """
+    STATISTICS QUESTIONS MUST BYPASS PERSON RESOLUTION (Section 8)
+    AND STRICTLY PRESERVE ALL CONDITIONS (Sections 1-13).
+    Returns the validated structured query plan.
+    """
+    if not query_text:
+        return None
+    
+    plan = build_structured_query_plan(query_text)
+    if not plan:
+        return None
+    
+    is_valid, reason = validate_structured_query_plan(query_text, plan)
+    if not is_valid:
+        print(f"[QUERY_PLAN_VALIDATOR] Warning: {reason}")
+        plan["validation_error"] = reason
+        plan["is_valid"] = False
+    else:
+        plan["is_valid"] = True
+        plan["validation_error"] = None
+        
+    return plan
+
+
 def extract_query_entities_and_constraints(query_text: str, user_parish: str = None) -> dict:
     """
     EXTRACT ALL ENTITIES BEFORE RETRIEVAL (Rule 1 & 2):
@@ -273,9 +660,24 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
         "sacrament": None,
         "intent": "GENERAL_MEMBER",
         "scope": "GENERAL_MEMBER",
-        "stripped_query": q
+        "stripped_query": q,
+        "person_entity_detected": False,
+        "is_statistical": False,
+        "filters": {}
     }
     if not q:
+        return constraints
+
+    # RULE 8: STATISTICS QUESTIONS MUST NOT ENTER PERSON RESOLUTION
+    stats_plan = detect_statistical_query(q)
+    if stats_plan:
+        constraints["intent"] = stats_plan.get("intent", "MEMBER_STATISTICS")
+        constraints["scope"] = stats_plan.get("intent", "MEMBER_STATISTICS")
+        constraints["person_name"] = None
+        constraints["person_entity_detected"] = False
+        constraints["is_statistical"] = True
+        constraints["filters"] = stats_plan.get("filters", {})
+        constraints["statistical_plan"] = stats_plan
         return constraints
 
     working_q = q
@@ -788,164 +1190,6 @@ def build_candidate_prompt(query_text: str, person_name: str, cand_name: str, ca
     return f"{display_text}{card_suffix}", display_text
 
 
-def detect_statistical_query(query_text: str) -> Optional[dict]:
-    """
-    STATISTICS QUESTIONS MUST BYPASS PERSON RESOLUTION:
-    Determines whether a query is asking for an aggregate/statistical result
-    (e.g., gender counts, member totals, family totals, BCC distribution, annual sacrament counts).
-    Returns structured statistical dimensions with person_name = None, or None if not an aggregate query.
-    """
-    if not query_text:
-        return None
-    q = query_text.lower().strip()
-    q_clean = re.sub(r'[\?!]+$', '', q).strip()
-
-    # Guard: Individual person family count query like "Antony Selvan's family" or "in Antony Selvan's family"
-    m_person_fam = re.search(r"\b(?:of|for|in|about)\s+([A-Za-z\s]+?)(?:'s|’s)\s+(?:family\s+members?|family|household)\b", q_clean)
-    if m_person_fam:
-        name_seg = m_person_fam.group(1).strip().lower()
-        if name_seg not in ('women', 'men', 'woman', 'man', 'our', 'the', 'my'):
-            return None
-
-    # Guard: Tamil individual person family query e.g. "அந்தோணி செல்வன் குடும்பத்தில் எத்தனை பேர்"
-    if 'குடும்பத்தில்' in q_clean or 'குடும்பத்தின்' in q_clean or 'குடும்பம்' in q_clean:
-        words = q_clean.split()
-        if len(words) >= 2:
-            first_w = words[0]
-            if first_w not in ('பங்கில்', 'எங்கள்', 'நமது', 'மொத்த', 'எத்தனை', 'இந்த'):
-                m_p = re.search(r'^\s*([^\s]+(?:\s+[^\s]+)?)\s+(?:குடும்பத்தில்|குடும்பத்தின்|குடும்பம்)', q_clean)
-                if m_p:
-                    cand = m_p.group(1)
-                    if cand not in ('பங்கு', 'பங்கில்', 'மொத்த', 'எத்தனை', 'அனைத்து'):
-                        if any(k in q_clean for k in ['எத்தனை பேர்', 'உறுப்பினர்கள் யார்', 'விவரம்']):
-                            return None
-
-    # 1. Detect Statistical / Aggregate intent keywords
-    has_count_kw = bool(re.search(
-        r'\b(?:how\s+many|number\s+of|count\s+of|count|total\s+number|total\s+count|total|how\s+much|breakdown|distribution|ratio|percentage|statistics|stats|summary)\b',
-        q_clean
-    ) or any(k in q_clean for k in ['எத்தனை', 'மொத்தம்', 'எண்ணிக்கை', 'புள்ளிவிவரம்', 'விகிதம்', 'பகிர்வு', 'கூட்டுத்தொகை', 'வாரியாக']))
-
-    has_year_wise = bool(re.search(r'\b(?:year[\s\-]*wise|by\s+year|yearly|each\s+year|annual|annually)\b', q_clean) or 'ஆண்டு வாரியாக' in q_clean)
-
-    # 2. Detect Gender dimension
-    has_women = bool(re.search(r"\b(?:women|woman|female|females|girls|girl|women's|womens)\b", q_clean) or any(k in q_clean for k in ['பெண்கள்', 'பெண்', 'சிறுமிகள்']))
-    has_men = bool(re.search(r"\b(?:men|man|male|males|boys|boy|men's|mens)\b", q_clean) or any(k in q_clean for k in ['ஆண்கள்', 'ஆண்', 'சிறுவர்கள்']))
-    has_gender_wise = bool(re.search(r'\b(?:gender[\s\-]*wise|by\s+gender|gender\s+count|gender\s+breakdown|gender)\b', q_clean) or 'பாலின வாரியாக' in q_clean or 'பாலினம்' in q_clean)
-
-    # 3. Detect BCC / Anbiyam dimension
-    has_bcc_wise = bool(re.search(r'\b(?:in\s+each\s+bcc|in\s+each\s+anbiyam|each\s+bcc|each\s+anbiyam|bcc[\s\-]*wise|anbiyam[\s\-]*wise|per\s+bcc|per\s+anbiyam|by\s+bcc|by\s+anbiyam|every\s+bcc|every\s+anbiyam)\b', q_clean) or any(k in q_clean for k in ['அன்பிய வாரியாக', 'ஒவ்வொரு அன்பியத்திலும்', 'அன்பியம் வாரியாக']))
-    anbiyam_filter = None
-    if not has_bcc_wise:
-        m_anb = re.search(r"\b(?:in|at|of|for)\s+([A-Za-z0-9\s\.\'\"]+?)\s+(?:anbiyam|bcc)\b", q_clean)
-        if m_anb:
-            cand = m_anb.group(1).strip()
-            cand_clean = re.sub(r'^(?:the|a|an)\s+', '', cand, flags=re.IGNORECASE).strip()
-            if cand_clean and cand_clean.lower() not in ('each', 'every', 'all', 'our', 'this'):
-                anbiyam_filter = cand_clean
-        else:
-            m_ta_anb = re.search(r'([\u0B80-\u0BFF\s]+?)\s+(?:அன்பியத்தில்|அன்பியத்தின்|அன்பியம்)', q_clean)
-            if m_ta_anb:
-                cand_ta = m_ta_anb.group(1).strip()
-                cand_ta_clean = re.sub(r'^(?:ஒவ்வொரு|அனைத்து|எங்கள்|நமது)\s+', '', cand_ta).strip()
-                if cand_ta_clean:
-                    anbiyam_filter = cand_ta_clean
-
-    # 4. Detect Sacrament dimension
-    has_baptism = bool(re.search(r'\b(?:baptism|baptisms|baptised|baptized)\b', q_clean) or any(k in q_clean for k in ['திருமுழுக்கு', 'ஞானஸ்நானம்']))
-    has_communion = bool(re.search(r'\b(?:communion|first\s+holy\s+communion|fhc)\b', q_clean) or any(k in q_clean for k in ['முதல் நற்கருணை', 'நற்கருணை', 'புதுநன்மை']))
-    has_confirmation = bool(re.search(r'\b(?:confirmation|confirmations)\b', q_clean) or any(k in q_clean for k in ['உறுதிப்பூசுதல்', 'உறுதிபூசுதல்']))
-    has_marriage = bool(re.search(r'\b(?:marriage|marriages|wedding|weddings)\b', q_clean) or any(k in q_clean for k in ['திருமணம்', 'விவாகம்']))
-    has_sacrament = has_baptism or has_communion or has_confirmation or has_marriage or bool(re.search(r'\b(?:sacraments?|sacrements?)\b', q_clean) or 'அருட்சாதன' in q_clean or 'திருவருட்சாதன' in q_clean)
-
-    # Detect Year filter
-    m_yr = re.search(r'\b(19\d\d|20\d\d)\b', q_clean)
-    year_filter = int(m_yr.group(1)) if m_yr else None
-
-    # 5. Detect Family entity
-    has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை']))
-
-    # 6. Detect Member entity
-    has_member = bool(re.search(r'\b(?:members|parishioners|people|persons|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்']))
-
-    # NOW EVALUATE:
-    # A. Gender Statistics
-    if (has_count_kw or has_gender_wise) and (has_women or has_men or has_gender_wise):
-        if (has_women and has_men) or has_gender_wise:
-            group_by = 'GENDER'
-            genders = ['FEMALE', 'MALE']
-        elif has_women:
-            group_by = None
-            genders = ['FEMALE']
-        else:
-            group_by = None
-            genders = ['MALE']
-        return {
-            'is_statistical': True,
-            'intent': 'MEMBER_STATISTICS',
-            'metric': 'COUNT',
-            'entity': 'MEMBER',
-            'group_by': group_by,
-            'gender': genders,
-            'anbiyam': anbiyam_filter,
-            'scope': 'AUTHORIZED_PARISH',
-            'person_name': None
-        }
-
-    # B. BCC / Anbiyam Statistics
-    if has_bcc_wise or (has_count_kw and anbiyam_filter):
-        entity = 'FAMILY' if has_family and not has_member else 'MEMBER'
-        group_by = 'BCC' if has_bcc_wise else None
-        return {
-            'is_statistical': True,
-            'intent': 'MEMBER_STATISTICS' if entity == 'MEMBER' else 'FAMILY_STATISTICS',
-            'metric': 'COUNT',
-            'entity': entity,
-            'group_by': group_by,
-            'anbiyam': anbiyam_filter,
-            'scope': 'AUTHORIZED_PARISH',
-            'person_name': None
-        }
-
-    # C. Sacrament Statistics
-    if has_sacrament and (has_count_kw or has_year_wise or year_filter):
-        sac = 'BAPTISM' if has_baptism else ('COMMUNION' if has_communion else ('CONFIRMATION' if has_confirmation else ('MARRIAGE' if has_marriage else 'SACRAMENT')))
-        return {
-            'is_statistical': True,
-            'intent': 'SACRAMENT_STATISTICS',
-            'metric': 'COUNT',
-            'entity': sac,
-            'group_by': 'YEAR' if has_year_wise else None,
-            'year': year_filter,
-            'scope': 'AUTHORIZED_PARISH',
-            'person_name': None
-        }
-
-    # D. Parish Family Count
-    if (has_count_kw and has_family) or q_clean in ['total families', 'family count', 'number of families']:
-        return {
-            'is_statistical': True,
-            'intent': 'FAMILY_STATISTICS',
-            'metric': 'COUNT',
-            'entity': 'FAMILY',
-            'group_by': None,
-            'scope': 'AUTHORIZED_PARISH',
-            'person_name': None
-        }
-
-    # E. Parish Member Count
-    if (has_count_kw and (has_member or 'in our parish' in q_clean or 'in the parish' in q_clean or 'in this parish' in q_clean)) or q_clean in ['total members', 'member count', 'number of members', 'total registered members']:
-        return {
-            'is_statistical': True,
-            'intent': 'MEMBER_STATISTICS',
-            'metric': 'COUNT',
-            'entity': 'MEMBER',
-            'group_by': None,
-            'scope': 'AUTHORIZED_PARISH',
-            'person_name': None
-        }
-
-    return None
 
 
 def classify_query_intent(query_text: str) -> dict:
@@ -1160,7 +1404,9 @@ def extract_intent_and_person(query_text: str) -> tuple[str, str]:
     return intent, pname
 
 def extract_person_name_from_query(query_text: str) -> str:
-    """Extracts only the verified person name from query text."""
+    """Extracts only the verified person name from query text (Section 8: Bypasses for statistics)."""
+    if detect_statistical_query(query_text):
+        return ""
     _, person_name = extract_intent_and_person(query_text)
     return person_name
 
@@ -1491,14 +1737,17 @@ def execute_parish_statistics(
     language: str = "en"
 ) -> dict:
     """
-    Executes parish aggregate/statistical queries directly without invoking person name resolution.
+    Executes parish aggregate/statistical queries directly without invoking person name resolution (Section 8).
+    STRICTLY PRESERVES all explicit filters, conditions, age operators/ranges, gender, BCC, and groupings (Sections 1-13).
     Handles:
-    - Gender-wise member statistics (Male vs Female counts, percentages, table)
-    - Single gender queries (e.g. men count, women count)
-    - BCC / Anbiyam distribution and member counts
-    - Specific Anbiyam gender filtering (e.g. "How many men are there in Arockiya Annai Anbiyam?")
-    - Parish member and family totals
-    - Sacrament event totals (e.g. baptisms in 2024)
+    - Critical Rule: Validates query plan before execution (Sections 6 & 12).
+    - Age Data Validation: Checks database field and approved age calculation (Section 10).
+    - Gender-wise member statistics with optional age filters (Section 5).
+    - Single gender queries with optional age filters (Section 4).
+    - Age range and comparison filters on members (Sections 1, 2, 3).
+    - BCC / Anbiyam distribution and member counts with optional age filters.
+    - Parish member and family totals (within authorized parish scope).
+    - Sacrament event totals.
     """
     import frappe
     if not getattr(frappe, "db", None):
@@ -1507,15 +1756,30 @@ def execute_parish_statistics(
         except Exception:
             pass
 
+    # CRITICAL RULE (Section 6 & 12): Query Plan Validation
+    if stats_dims.get("is_valid") is False:
+        err_msg = stats_dims.get("validation_error") or "Query plan dropped explicit filter conditions."
+        return {
+            "reply": f"⚠️ Query Plan Validation Error: {err_msg}. Query execution halted to preserve strict filter integrity.",
+            "generated_sql": "",
+            "data": [],
+            "disambiguation": None,
+            "suggested_questions": [],
+            "query_id": -1
+        }
+
     is_ta = language == "ta"
     scope_name = user_parish or user_diocese or "your authorized parish"
-    entity = stats_dims.get("entity", "MEMBER")
+    filters = stats_dims.get("filters") or {}
+    age_filter = filters.get("age") or stats_dims.get("age")
+    gender_filter = filters.get("gender")
+    anbiyam = filters.get("anbiyam") or stats_dims.get("anbiyam")
+    year = filters.get("year") or stats_dims.get("year")
     group_by = stats_dims.get("group_by")
+    entity = stats_dims.get("entity_type") or stats_dims.get("entity", "MEMBER")
     genders = stats_dims.get("gender")
-    anbiyam = stats_dims.get("anbiyam")
-    year = stats_dims.get("year")
 
-    # Base WHERE clauses strictly scoped to authorized parish
+    # Base WHERE clauses strictly scoped to authorized parish (Section 9)
     where_m = []
     params_m = []
     where_f = []
@@ -1532,13 +1796,57 @@ def execute_parish_statistics(
         where_f.append("f.diocese_id = %s")
         params_f.append(user_diocese)
 
-    # 1. Gender Statistics (group_by == "GENDER")
+    # Section 10: Age Data Validation
+    age_coverage_note = ""
+    if age_filter and entity == "MEMBER":
+        try:
+            base_cov_w = " AND ".join(where_m) if where_m else "1=1"
+            cov_sql = f"""
+                SELECT 
+                    COUNT(CASE WHEN (m.age > 0 OR m.dob IS NOT NULL) THEN 1 END) AS age_recorded,
+                    COUNT(*) AS total_count
+                FROM `tabMember` m
+                LEFT JOIN `tabFamily` f ON m.family_id = f.name
+                WHERE {base_cov_w}
+            """
+            cov_rows = frappe.db.sql(cov_sql, tuple(params_m), as_dict=True)
+            age_recorded = cov_rows[0].get("age_recorded") if cov_rows else 0
+            total_parish_m = cov_rows[0].get("total_count") if cov_rows else 0
+
+            if age_recorded == 0:
+                if is_ta:
+                    reply = f"மன்னிக்கவும், **{scope_name}** பதிவேட்டில் உள்ள உறுப்பினர்களுக்கு வயது அல்லது பிறந்த தேதி விவரங்கள் எதுவும் பதிவு செய்யப்படவில்லை (0/{total_parish_m}). எனவே கோரப்பட்ட வயது அடிப்படையிலான புள்ளிவிவரக் கணக்கீட்டை செய்ய இயலவில்லை."
+                else:
+                    reply = f"The available parish records in **{scope_name}** currently do not contain sufficient age or date of birth information to calculate this statistic (0 of {total_parish_m} members have recorded age data in the registry)."
+                return {
+                    "reply": reply,
+                    "generated_sql": cov_sql,
+                    "data": [{"jurisdiction": scope_name, "age_recorded_members": 0, "total_members": total_parish_m}],
+                    "record_count": 0,
+                    "suggested_questions": [
+                        f"What is the total number of members in {scope_name}?",
+                        f"What is the total number of families in {scope_name}?",
+                        "Show gender-wise member statistics"
+                    ],
+                    "query_id": -1
+                }
+            elif age_recorded < total_parish_m:
+                if is_ta:
+                    age_coverage_note = f"\n\n*(குறிப்பு: பதிவேட்டில் வயது அல்லது பிறந்த தேதி விவரம் உள்ள உறுப்பினர்களின் அடிப்படையில் — {age_recorded}/{total_parish_m} உறுப்பினர்கள் பதிவு செய்யப்பட்டுள்ளனர்).* "
+                else:
+                    age_coverage_note = f"\n\n*(Note: Based on verified records in the parish registry where age or date of birth is documented — {age_recorded} of {total_parish_m} members currently have recorded age data).* "
+        except Exception as cov_err:
+            print(f"[execute_parish_statistics] Age coverage check notice: {cov_err}")
+
+    # 1. Gender Statistics (group_by == "GENDER") WITH optional age filter (Section 5)
     if entity == "MEMBER" and group_by == "GENDER":
         where_clauses = list(where_m)
         params = list(params_m)
         if anbiyam:
             where_clauses.append("f.parish_bcc_id LIKE %s")
             params.append(f"%{anbiyam}%")
+        if age_filter:
+            where_clauses.append(build_sql_age_expression(age_filter))
         base_w = " AND ".join(where_clauses) if where_clauses else "1=1"
         sql = f"""
             SELECT 
@@ -1561,26 +1869,30 @@ def execute_parish_statistics(
 
         anb_label = f" in **{anbiyam}**" if anbiyam else ""
         anb_label_ta = f" (**{anbiyam}**)" if anbiyam else ""
+        age_label = f" (Age: {format_age_filter_label(age_filter)})" if age_filter else ""
+        age_label_ta = f" (வயது: {format_age_filter_label(age_filter, is_ta=True)})" if age_filter else ""
+        age_filter_phrase = f" with age {format_age_filter_label(age_filter)}" if age_filter else ""
+        age_filter_phrase_ta = f" {format_age_filter_label(age_filter, is_ta=True)}" if age_filter else ""
 
         if is_ta:
             lines = [
-                f"### 📊 {scope_name}{anb_label_ta} — பாலின வாரியான உறுப்பினர் புள்ளிவிவரம்\n",
+                f"### 📊 {scope_name}{anb_label_ta}{age_label_ta} — பாலின வாரியான உறுப்பினர் புள்ளிவிவரம்\n",
                 "| பாலினம் | எண்ணிக்கை | சதவீதம் |",
                 "| :--- | :--- | :--- |",
                 f"| **பெண்கள்** | {f_count:,} | {(f_count / total_m * 100):.1f}% |" if total_m else "| **பெண்கள்** | 0 | 0.0% |",
                 f"| **ஆண்கள்** | {m_count:,} | {(m_count / total_m * 100):.1f}% |" if total_m else "| **ஆண்கள்** | 0 | 0.0% |",
                 f"| **மொத்த உறுப்பினர்கள்** | **{total_m:,}** | **100.0%** |\n",
-                f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{f_count} பெண்களும்** மற்றும் **{m_count} ஆண்களும்** பதிவு செய்யப்பட்டுள்ளனர் (மொத்தம்: **{total_m} உறுப்பினர்கள்**)."
+                f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{f_count} பெண்களும்** மற்றும் **{m_count} ஆண்களும்**{age_filter_phrase_ta} பதிவு செய்யப்பட்டுள்ளனர் (மொத்தம்: **{total_m} உறுப்பினர்கள்**).{age_coverage_note}"
             ]
         else:
             lines = [
-                f"### 📊 {scope_name}{anb_label} — Gender-wise Member Statistics\n",
+                f"### 📊 {scope_name}{anb_label}{age_label} — Gender-wise Member Statistics\n",
                 "| Gender | Count | Percentage |",
                 "| :--- | :--- | :--- |",
                 f"| **Female (Women)** | {f_count:,} | {(f_count / total_m * 100):.1f}% |" if total_m else "| **Female (Women)** | 0 | 0.0% |",
                 f"| **Male (Men)** | {m_count:,} | {(m_count / total_m * 100):.1f}% |" if total_m else "| **Male (Men)** | 0 | 0.0% |",
                 f"| **Total Members** | **{total_m:,}** | **100.0%** |\n",
-                f"In **{scope_name}**{anb_label}, there are currently **{f_count} women** and **{m_count} men** registered (Total: **{total_m} members**)."
+                f"In **{scope_name}**{anb_label}, there are currently **{f_count} women** and **{m_count} men** registered{age_filter_phrase} (Total: **{total_m} members**).{age_coverage_note}"
             ]
         return {
             "reply": "\n".join(lines),
@@ -1594,9 +1906,9 @@ def execute_parish_statistics(
             ]
         }
 
-    # 2. Single Gender Query (e.g. "How many men are there in Arockiya Annai Anbiyam?", "How many women in our parish?")
-    if entity == "MEMBER" and genders and len(genders) == 1:
-        target_g = genders[0].capitalize()
+    # 2. Single Gender Query WITH optional age filter (Section 4)
+    if entity == "MEMBER" and (gender_filter or (genders and len(genders) == 1)):
+        target_g = (gender_filter or (genders[0] if isinstance(genders, list) else genders)).capitalize()
         g_val = 'male' if target_g == 'Male' else 'female'
         g_display = 'men' if target_g == 'Male' else 'women'
         g_display_ta = 'ஆண்கள்' if target_g == 'Male' else 'பெண்கள்'
@@ -1608,6 +1920,8 @@ def execute_parish_statistics(
         if anbiyam:
             where_clauses.append("f.parish_bcc_id LIKE %s")
             params.append(f"%{anbiyam}%")
+        if age_filter:
+            where_clauses.append(build_sql_age_expression(age_filter))
         base_w = " AND ".join(where_clauses) if where_clauses else "1=1"
         sql = f"""
             SELECT COUNT(m.name) AS count
@@ -1633,14 +1947,17 @@ def execute_parish_statistics(
 
         anb_label = f" in **{actual_anbiyam}**" if actual_anbiyam else ""
         anb_label_ta = f", **{actual_anbiyam}** அன்பியத்தில்" if actual_anbiyam else ""
+        age_label = f" {format_age_filter_label(age_filter)}" if age_filter else ""
+        age_label_ta = f" {format_age_filter_label(age_filter, is_ta=True)}" if age_filter else ""
+
         if is_ta:
-            reply = f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{cnt} {g_display_ta}** பதிவு செய்யப்பட்டுள்ளனர்."
+            reply = f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{cnt} {g_display_ta}**{age_label_ta} பதிவு செய்யப்பட்டுள்ளனர்.{age_coverage_note}"
         else:
-            reply = f"There are currently **{cnt} {g_display}** registered{anb_label} in **{scope_name}**."
+            reply = f"There are currently **{cnt} {g_display}** registered{age_label}{anb_label} in **{scope_name}**.{age_coverage_note}"
         return {
             "reply": reply,
             "generated_sql": sql,
-            "data": [{"Category": f"{target_g} ({scope_name})", "Count": cnt}],
+            "data": [{"Category": f"{target_g} ({scope_name})", "Age Filter": format_age_filter_label(age_filter) if age_filter else "All", "Count": cnt}],
             "record_count": cnt,
             "suggested_questions": [
                 "Give the gender-wise member count",
@@ -1649,16 +1966,69 @@ def execute_parish_statistics(
             ]
         }
 
-    # 3. BCC / Anbiyam-wise Distribution (group_by == "BCC")
+    # 3. Overall Member Query WITH Age Filter (Sections 1, 2, 3, 11)
+    if entity == "MEMBER" and age_filter:
+        where_clauses = list(where_m)
+        params = list(params_m)
+        if anbiyam:
+            where_clauses.append("f.parish_bcc_id LIKE %s")
+            params.append(f"%{anbiyam}%")
+        where_clauses.append(build_sql_age_expression(age_filter))
+        base_w = " AND ".join(where_clauses) if where_clauses else "1=1"
+        sql = f"""
+            SELECT COUNT(m.name) AS count
+            FROM `tabMember` m
+            LEFT JOIN `tabFamily` f ON m.family_id = f.name
+            WHERE {base_w}
+        """
+        cnt = frappe.db.sql(sql, tuple(params))[0][0]
+        actual_anbiyam = anbiyam
+        if anbiyam:
+            try:
+                db_bcc = frappe.db.sql(
+                    "SELECT DISTINCT parish_bcc_id FROM `tabFamily` WHERE parish_bcc_id LIKE %s AND parish_bcc_id != '' LIMIT 1",
+                    (f"%{anbiyam}%",),
+                    as_dict=True
+                )
+                if db_bcc and db_bcc[0].get("parish_bcc_id"):
+                    actual_anbiyam = db_bcc[0]["parish_bcc_id"]
+                elif not actual_anbiyam.lower().endswith("anbiyam") and not actual_anbiyam.lower().endswith("bcc"):
+                    actual_anbiyam = f"{actual_anbiyam.title()} Anbiyam"
+            except Exception:
+                actual_anbiyam = anbiyam.title() if anbiyam else ""
+
+        anb_label = f" in **{actual_anbiyam}**" if actual_anbiyam else ""
+        anb_label_ta = f", **{actual_anbiyam}** அன்பியத்தில்" if actual_anbiyam else ""
+        age_label = f" {format_age_filter_label(age_filter)}"
+        age_label_ta = f" {format_age_filter_label(age_filter, is_ta=True)}"
+
+        if is_ta:
+            reply = f"**{scope_name}** பங்கில்{anb_label_ta} மொத்தம் **{cnt} உறுப்பினர்கள்**{age_label_ta} பதிவு செய்யப்பட்டுள்ளனர்.{age_coverage_note}"
+        else:
+            reply = f"There are currently **{cnt} members** registered{age_label}{anb_label} in **{scope_name}**.{age_coverage_note}"
+        return {
+            "reply": reply,
+            "generated_sql": sql,
+            "data": [{"Category": f"Members ({scope_name})", "Age Filter": format_age_filter_label(age_filter), "Count": cnt}],
+            "record_count": cnt,
+            "suggested_questions": [
+                "Give the gender-wise member count",
+                "How many members are in each BCC?",
+                "What is the total number of families?"
+            ]
+        }
+
+    # 4. BCC / Anbiyam-wise Distribution (group_by == "BCC") WITH optional age filter
     if group_by == "BCC":
         base_w = " AND ".join(where_f) if where_f else "1=1"
+        age_join_cond = f"AND {build_sql_age_expression(age_filter, col_name='m.age', dob_col='m.dob')}" if age_filter else ""
         sql = f"""
             SELECT 
                 COALESCE(NULLIF(f.parish_bcc_id, ''), 'Unassigned') AS `anbiyam`,
                 COUNT(m.name) AS `member_count`,
                 COUNT(DISTINCT f.name) AS `family_count`
             FROM `tabFamily` f
-            LEFT JOIN `tabMember` m ON m.family_id = f.name
+            LEFT JOIN `tabMember` m ON m.family_id = f.name {age_join_cond}
             WHERE {base_w}
             GROUP BY f.parish_bcc_id
             ORDER BY `member_count` DESC
@@ -1666,27 +2036,29 @@ def execute_parish_statistics(
         rows = frappe.db.sql(sql, tuple(params_f), as_dict=True)
         tot_members = sum(r["member_count"] for r in rows)
         tot_families = sum(r["family_count"] for r in rows)
+        age_label = f" ({format_age_filter_label(age_filter)})" if age_filter else ""
+        age_label_ta = f" ({format_age_filter_label(age_filter, is_ta=True)})" if age_filter else ""
 
         if is_ta:
             lines = [
-                f"### 📊 {scope_name} — அன்பிய வாரியான உறுப்பினர்கள் மற்றும் குடும்பங்கள் விவரம்\n",
+                f"### 📊 {scope_name}{age_label_ta} — அன்பிய வாரியான உறுப்பினர்கள் மற்றும் குடும்பங்கள் விவரம்\n",
                 "| # | அன்பியம் (BCC) | உறுப்பினர்கள் | குடும்பங்கள் |",
                 "| :--- | :--- | :--- | :--- |"
             ]
             for idx, r in enumerate(rows, 1):
                 lines.append(f"| {idx} | **{r['anbiyam']}** | {r['member_count']} | {r['family_count']} |")
             lines.append(f"| | **மொத்தம்** | **{tot_members}** | **{tot_families}** |\n")
-            lines.append(f"**{scope_name}** பங்கில் உள்ள அன்பியங்கள் வாரியான விவரம் மேலே அட்டவணையில் கொடுக்கப்பட்டுள்ளது.")
+            lines.append(f"**{scope_name}** பங்கில் உள்ள அன்பியங்கள் வாரியான விவரம் மேலே அட்டவணையில் கொடுக்கப்பட்டுள்ளது.{age_coverage_note}")
         else:
             lines = [
-                f"### 📊 {scope_name} — BCC / Anbiyam-wise Member & Family Distribution\n",
+                f"### 📊 {scope_name}{age_label} — BCC / Anbiyam-wise Member & Family Distribution\n",
                 "| # | BCC / Anbiyam | Members | Families |",
                 "| :--- | :--- | :--- | :--- |"
             ]
             for idx, r in enumerate(rows, 1):
                 lines.append(f"| {idx} | **{r['anbiyam']}** | {r['member_count']} | {r['family_count']} |")
             lines.append(f"| | **Total** | **{tot_members}** | **{tot_families}** |\n")
-            lines.append(f"Here is the BCC/Anbiyam-wise member and family distribution for **{scope_name}**.")
+            lines.append(f"Here is the BCC/Anbiyam-wise member and family distribution for **{scope_name}**.{age_coverage_note}")
 
         return {
             "reply": "\n".join(lines),
@@ -1700,15 +2072,15 @@ def execute_parish_statistics(
             ]
         }
 
-    # 4. Total Families
+    # 5. Total Families (only when pure total family count is requested)
     if entity == "FAMILY" and not group_by and not anbiyam:
         return handle_count_families(user_parish=user_parish, user_diocese=user_diocese)
 
-    # 5. Total Members
-    if entity == "MEMBER" and not group_by and not anbiyam:
+    # 6. Total Members (only when pure total member count is requested without filters)
+    if entity == "MEMBER" and not group_by and not anbiyam and not age_filter and not gender_filter:
         return handle_count_members(user_parish=user_parish, user_diocese=user_diocese)
 
-    # 6. Sacrament Counts (e.g. Baptisms in 2024)
+    # 7. Sacrament Counts (e.g. Baptisms in 2024)
     if entity in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE", "SACRAMENT"):
         from koinonia_assistant.rag.analytics_engine import SACRAMENT_METRICS
         m_key = entity.lower()

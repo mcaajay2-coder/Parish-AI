@@ -321,70 +321,23 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             "final_response_language": "ta" if lang == "ta" else "en",
         }
 
-    # 2. Direct Tamil Structured Understanding (when Tamil script is present)
-    if lang == "ta":
-        ta_info = extract_tamil_structured_intent(q_clean)
-        t_intent = ta_info["intent"]
-        t_metrics = ta_info["metrics"]
-        t_years = ta_info["years_back"]
-        t_horizon = ta_info["forecast_horizon"]
-        if t_intent in ("FORECAST", "COMPARISON") and (t_horizon >= 5 or len(t_metrics) >= 2):
-            s_tier = "LONG_RUNNING"
-        elif t_intent in ("HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS", "TREND_ANALYSIS", "FORECAST", "COMPARISON"):
-            s_tier = "ANALYTICAL"
-        else:
-            s_tier = "FAST"
-
-        return {
-            "original_query": q_clean,
-            "detected_language": "ta",
-            "normalized_query": ta_info["normalized_query"],
-            "intent_query": ta_info["intent_query"],
-            "entity_query": ta_info["entity_query"],
-            "canonical_terms": ta_info["canonical_terms"],
-            "sacrament": ta_info["sacrament"],
-            "period": ta_info["period"],
-            "grouping": ta_info["grouping"],
-            "intent": t_intent,
-            "speed_tier": s_tier,
-            "metrics": t_metrics,
-            "years_back": t_years,
-            "forecast_horizon": t_horizon,
-            "include_forecast": t_intent == "FORECAST" or t_horizon > 0,
-            "family_card": ta_info.get("family_card"),
-            "person_name": (
-                ta_info["person_entity"].get("transliterated_name")
-                or ta_info["person_entity"].get("original_name")
-            ),
-            "person_entity": ta_info.get("person_entity"),
-            "final_response_language": "ta",
-            "sub_intent": ta_info.get("sub_intent"),
-            "scope": ta_info.get("scope"),
-        }
-
-    # 3. English / Mixed Query Classification
-    metrics = []
-    canonical_terms = {}
-    if any(w in q_low for w in ["baptism", "baptized", "baptised", "christening"]):
-        metrics.append("baptism")
-        canonical_terms["BAPTISM"] = "Baptism"
-    if any(w in q_low for w in ["communion", "fhc", "eucharist", "holy communion"]):
-        metrics.append("communion")
-        canonical_terms["FIRST_HOLY_COMMUNION"] = "First Holy Communion"
-    if any(w in q_low for w in ["confirmation", "confirmed"]):
-        metrics.append("confirmation")
-        canonical_terms["CONFIRMATION"] = "Confirmation"
-    if any(w in q_low for w in ["marriage", "married", "matrimony", "wedding"]):
-        metrics.append("marriage")
-        canonical_terms["MARRIAGE"] = "Marriage"
-
-    # 3.1 STATISTICAL & AGGREGATE PRE-ROUTING (Bypasses Person Name Extraction completely)
+    # 2. STATISTICAL & AGGREGATE PRE-ROUTING (Bypasses Person Name Extraction completely)
     from koinonia_assistant.rag.name_search import detect_statistical_query
     stats_dims = detect_statistical_query(q_clean)
     if stats_dims:
         s_ent = stats_dims["entity"]
         s_int = stats_dims["intent"]
         s_group = stats_dims.get("group_by")
+
+        canonical_terms = {}
+        if any(w in q_low for w in ["baptism", "baptized", "baptised", "christening", "ஞானஸ்நானம்", "திருமுழுக்கு"]):
+            canonical_terms["BAPTISM"] = "Baptism"
+        if any(w in q_low for w in ["communion", "fhc", "eucharist", "holy communion", "நற்கருணை", "திருவிருந்து"]):
+            canonical_terms["FIRST_HOLY_COMMUNION"] = "First Holy Communion"
+        if any(w in q_low for w in ["confirmation", "confirmed", "உறுதிப்பூசுதல்"]):
+            canonical_terms["CONFIRMATION"] = "Confirmation"
+        if any(w in q_low for w in ["marriage", "married", "matrimony", "wedding", "திருமணம்"]):
+            canonical_terms["MARRIAGE"] = "Marriage"
 
         # If year-wise sacrament query, route to HISTORICAL_ANALYSIS/analytics_node
         if s_group == "YEAR" and s_ent in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE", "SACRAMENT"):
@@ -427,6 +380,63 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             "metrics": [s_ent.lower()] if s_ent in ("BAPTISM", "COMMUNION", "CONFIRMATION", "MARRIAGE") else [],
             "statistical_dimensions": stats_dims,
         }
+
+    # 3. Direct Tamil Structured Understanding (when Tamil script is present)
+    if lang == "ta":
+        ta_info = extract_tamil_structured_intent(q_clean)
+        t_intent = ta_info["intent"]
+        t_metrics = ta_info["metrics"]
+        t_years = ta_info["years_back"]
+        t_horizon = ta_info["forecast_horizon"]
+        if t_intent in ("FORECAST", "COMPARISON") and (t_horizon >= 5 or len(t_metrics) >= 2):
+            s_tier = "LONG_RUNNING"
+        elif t_intent in ("HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS", "TREND_ANALYSIS", "FORECAST", "COMPARISON"):
+            s_tier = "ANALYTICAL"
+        else:
+            s_tier = "FAST"
+
+        return {
+            "original_query": q_clean,
+            "detected_language": "ta",
+            "normalized_query": ta_info["normalized_query"],
+            "intent_query": ta_info["intent_query"],
+            "entity_query": ta_info["entity_query"],
+            "canonical_terms": ta_info["canonical_terms"],
+            "sacrament": ta_info["sacrament"],
+            "period": ta_info["period"],
+            "grouping": ta_info["grouping"],
+            "intent": t_intent,
+            "speed_tier": s_tier,
+            "metrics": t_metrics,
+            "years_back": t_years,
+            "forecast_horizon": t_horizon,
+            "include_forecast": t_intent == "FORECAST" or t_horizon > 0,
+            "family_card": ta_info.get("family_card"),
+            "person_name": (
+                ta_info["person_entity"].get("transliterated_name")
+                or ta_info["person_entity"].get("original_name")
+            ),
+            "person_entity": ta_info.get("person_entity"),
+            "final_response_language": "ta",
+            "sub_intent": ta_info.get("sub_intent"),
+            "scope": ta_info.get("scope"),
+        }
+
+    # 4. English / Mixed Query Classification
+    metrics = []
+    canonical_terms = {}
+    if any(w in q_low for w in ["baptism", "baptized", "baptised", "christening"]):
+        metrics.append("baptism")
+        canonical_terms["BAPTISM"] = "Baptism"
+    if any(w in q_low for w in ["communion", "fhc", "eucharist", "holy communion"]):
+        metrics.append("communion")
+        canonical_terms["FIRST_HOLY_COMMUNION"] = "First Holy Communion"
+    if any(w in q_low for w in ["confirmation", "confirmed"]):
+        metrics.append("confirmation")
+        canonical_terms["CONFIRMATION"] = "Confirmation"
+    if any(w in q_low for w in ["marriage", "married", "matrimony", "wedding"]):
+        metrics.append("marriage")
+        canonical_terms["MARRIAGE"] = "Marriage"
 
     years_back = 10
     m_past = re.search(r"\b(?:last|past|previous|over\s+the\s+last|for\s+the\s+last)\s+(\d+)\s+years?\b", q_low)
