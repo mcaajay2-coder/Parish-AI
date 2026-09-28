@@ -549,7 +549,11 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
     has_communion = bool(re.search(r'\b(?:communion|first\s+holy\s+communion|fhc)\b', q_clean) or any(k in q_clean for k in ['முதல் நற்கருணை', 'நற்கருணை', 'புதுநன்மை']))
     has_confirmation = bool(re.search(r'\b(?:confirmation|confirmations)\b', q_clean) or any(k in q_clean for k in ['உறுதிப்பூசுதல்', 'உறுதிபூசுதல்']))
     has_marriage = bool(re.search(r'\b(?:marriage|marriages|wedding|weddings)\b', q_clean) or any(k in q_clean for k in ['திருமணம்', 'விவாகம்']))
-    has_sacrament = has_baptism or has_communion or has_confirmation or has_marriage or bool(re.search(r'\b(?:sacraments?|sacrements?)\b', q_clean) or 'அருட்சாதன' in q_clean or 'திருவருட்சாதன' in q_clean)
+    sac_kw_pattern = r'\b(?:sacraments?|sacrements?|sacremenets?|sacrametns?|sacramnets?|sacrments?)\b'
+    has_sacrament = has_baptism or has_communion or has_confirmation or has_marriage or bool(re.search(sac_kw_pattern, q_clean) or 'அருட்சாதன' in q_clean or 'திருவருட்சாதன' in q_clean)
+
+    # Detect member sacrament count (e.g. "how many membrs are got 5 sacremenets", "who got 3 sacraments")
+    m_sac_count = re.search(r'\b(?:who\s+)?(?:are\s+|is\s+|have\s+|having\s+|has\s+|got\s+|received\s+|with\s+)*(?:got|received|have|with|having)\s+(\d+)\s+' + sac_kw_pattern, q_clean) or re.search(r'\b(\d+)\s+' + sac_kw_pattern, q_clean) or re.search(r'(\d+)\s+(?:திருவருட்சாதனங்கள்|அருட்சாதனங்கள்|சாதனங்கள்)', q_clean)
 
     # Detect Year filter
     m_yr = re.search(r'\b(19\d\d|20\d\d)\b', q_clean)
@@ -559,14 +563,17 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
     has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை']))
 
     # 6. Detect Member entity
-    has_member = bool(re.search(r'\b(?:members|parishioners|people|persons|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்', 'நபர்கள்', 'நபர்']))
+    has_member = bool(re.search(r'\b(?:members?|membrs?|parishioners?|people|persons?|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்', 'நபர்கள்', 'நபர்']))
 
     # If neither count keyword nor statistical trigger nor age condition exists, return None
-    if not (has_count_kw or age_filter_raw or has_bcc_wise or has_year_wise or (has_sacrament and year_filter)):
+    if not (has_count_kw or age_filter_raw or has_bcc_wise or has_year_wise or m_sac_count or (has_sacrament and year_filter)):
         return None
 
     # Determine Entity
-    if has_sacrament:
+    if m_sac_count:
+        entity = 'MEMBER'
+        intent = 'MEMBER_STATISTICS'
+    elif has_sacrament:
         entity = 'BAPTISM' if has_baptism else ('COMMUNION' if has_communion else ('CONFIRMATION' if has_confirmation else ('MARRIAGE' if has_marriage else 'SACRAMENT')))
         intent = 'SACRAMENT_STATISTICS'
     elif has_family and not has_member and not age_filter_raw and not has_women and not has_men:
@@ -578,6 +585,8 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
 
     # Build Filters dict (Section 11 format)
     filters = {}
+    if m_sac_count:
+        filters["sacrament_count"] = int(m_sac_count.group(1))
     if age_filter_raw:
         if age_filter_raw["type"] == "range":
             filters["age"] = {"min": age_filter_raw["min"], "max": age_filter_raw["max"]}
@@ -679,6 +688,14 @@ def validate_structured_query_plan(query_text: str, query_plan: dict) -> Tuple[b
     # 4. Person resolution verification (Section 8)
     if query_plan.get("person_entity_detected"):
         return False, "Statistical queries must not detect person entities or invoke person resolution."
+
+    # 5. Sacrament count verification
+    sac_kw_pattern = r'\b(?:sacraments?|sacrements?|sacremenets?|sacrametns?|sacramnets?|sacrments?)\b'
+    m_sac_q = re.search(r'\b(\d+)\s+' + sac_kw_pattern, q) or re.search(r'(\d+)\s+(?:திருவருட்சாதனங்கள்|அருட்சாதனங்கள்|சாதனங்கள்)', q)
+    if m_sac_q:
+        exp_sac = int(m_sac_q.group(1))
+        if filters.get("sacrament_count") != exp_sac:
+            return False, f"Original query requested {exp_sac} sacraments, but query plan dropped it."
 
     return True, None
 

@@ -186,22 +186,28 @@ def build_complete_query_plan(
             "is_statistical": False
         }
 
-    # 3. Check for Qualified Sacrament List
-    if pre_intent and pre_intent.get("intent") == "LIST" and pre_intent.get("sub_intent") == "QUALIFIED_MEMBER_SACRAMENT_LIST":
+    # 3. Check for Qualified Sacrament Count or List Query
+    sac_kw_pattern = r'\b(?:sacraments?|sacrements?|sacremenets?|sacrametns?|sacramnets?|sacrments?)\b'
+    m_sac_cnt = re.search(r'\b(?:who\s+)?(?:are\s+|is\s+|have\s+|having\s+|has\s+|got\s+|received\s+|with\s+)*(?:got|received|have|with|having)\s+(\d+)\s+' + sac_kw_pattern, q_low) or re.search(r'\b(\d+)\s+' + sac_kw_pattern, q_low) or re.search(r'(\d+)\s+(?:திருவருட்சாதனங்கள்|அருட்சாதனங்கள்|சாதனங்கள்)', q_low)
+    if m_sac_cnt or (pre_intent and pre_intent.get("sub_intent") == "QUALIFIED_MEMBER_SACRAMENT_LIST"):
+        sac_num = int(m_sac_cnt.group(1)) if m_sac_cnt else pre_intent.get("sacrament_count_filter", 3)
+        is_list = bool(re.search(r'\b(?:list|show|give|display|get)\b', q_low) and not re.search(r'\b(?:how\s+many|count|number\s+of)\b', q_low))
+        if pre_intent and pre_intent.get("intent") == "LIST":
+            is_list = True
         return {
-            "intent": "QUALIFIED_MEMBER_SACRAMENT_LIST",
+            "intent": "QUALIFIED_MEMBER_SACRAMENT_LIST" if is_list else "MEMBER_STATISTICS",
             "entity": "MEMBER",
-            "metric": "LIST",
+            "metric": "LIST" if is_list else "COUNT",
             "filters": {
-                "sacrament_count": pre_intent.get("sacrament_count_filter", 3),
-                "limit": pre_intent.get("limit", 10)
+                "sacrament_count": sac_num,
+                "limit": pre_intent.get("limit", 10) if pre_intent else 10
             },
             "group_by": None,
             "scope": scope,
             "parish": parish,
             "bcc": None,
             "identifier": None,
-            "is_statistical": False
+            "is_statistical": True
         }
 
     # 4. Check for Standard LIST Queries
@@ -326,6 +332,14 @@ def validate_query_plan_conditions(question: str, query_plan: dict) -> Tuple[boo
         expected_yr = int(m_yr.group(1))
         if filters.get("year") != expected_yr and group_by != "YEAR":
             return False, f"Year '{expected_yr}' condition missing from query plan."
+
+    # 7. Sacrament Count Check
+    sac_kw_pattern = r'\b(?:sacraments?|sacrements?|sacremenets?|sacrametns?|sacramnets?|sacrments?)\b'
+    m_sac_q = re.search(r'\b(\d+)\s+' + sac_kw_pattern, q) or re.search(r'(\d+)\s+(?:திருவருட்சாதனங்கள்|அருட்சாதனங்கள்|சாதனங்கள்)', q)
+    if m_sac_q:
+        exp_sac = int(m_sac_q.group(1))
+        if filters.get("sacrament_count") != exp_sac:
+            return False, f"Sacrament count '{exp_sac}' present in question but missing in query plan filters."
 
     return True, None
 
@@ -455,7 +469,40 @@ ORDER BY `year` ASC;"""
         expl = f"Aggregating annual {entity.lower()} events by year for {parish or 'authorized parish'}"
         return sql, expl
 
-    # ── 6. FILTERED MEMBER COUNT (Age, Gender, BCC, or Combinations) ────────
+    # ── 6. SACRAMENT COUNT FILTER (e.g. "how many members got 5 sacraments") ───
+    if entity == "MEMBER" and filters.get("sacrament_count") is not None:
+        target_count = int(filters["sacrament_count"])
+        sac_expr = "((m.bapt_date IS NOT NULL) + (m.fhc_date IS NOT NULL) + (m.cnf_date IS NOT NULL) + (m.mrg_date IS NOT NULL))"
+        if metric == "COUNT":
+            sql = f"""SELECT COUNT(m.name) AS `total_members`
+FROM `tabMember` m
+LEFT JOIN `tabFamily` f ON m.family_id = f.name
+WHERE {p_cond_m} {gender_sql_cond} {age_sql_cond} {bcc_sql_cond} AND ({sac_expr} = {target_count});"""
+            expl = f"Counting members with exactly {target_count} sacraments in {parish or 'authorized parish'}"
+            return sql, expl
+        else:
+            limit = filters.get("limit", 10)
+            sql = f"""SELECT 
+    m.name AS `member_id`,
+    TRIM(CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name)) AS `full_name`,
+    m.gender AS `gender`,
+    m.mobile AS `contact`,
+    f.family_register_number AS `family_card`,
+    f.reference AS `family_name`,
+    {sac_expr} AS `sacraments_count`,
+    m.bapt_date,
+    m.fhc_date,
+    m.cnf_date,
+    m.mrg_date
+FROM `tabMember` m
+LEFT JOIN `tabFamily` f ON m.family_id = f.name
+WHERE {p_cond_m} {gender_sql_cond} {age_sql_cond} {bcc_sql_cond} AND ({sac_expr} = {target_count})
+ORDER BY full_name ASC
+LIMIT {limit};"""
+            expl = f"Listing up to {limit} members with {target_count} sacraments in {parish or 'authorized parish'}"
+            return sql, expl
+
+    # ── 7. FILTERED MEMBER COUNT (Age, Gender, BCC, or Combinations) ────────
     if entity == "MEMBER" and metric == "COUNT" and (age_filter or gender_filter or bcc_filter):
         sql = f"""SELECT COUNT(m.name) AS `total`
 FROM `tabMember` m
@@ -994,7 +1041,31 @@ WHERE {p_cond};"""
             ]
         }
 
-    # 4. Filtered Member Count (Age / Gender / Single Count)
+    # 4. Sacrament Count Query Result
+    if entity == "MEMBER" and metric == "COUNT" and filters.get("sacrament_count") is not None:
+        target_cnt = int(filters["sacrament_count"])
+        val = int(sql_result[0].get("total", sql_result[0].get("total_members", 0))) if sql_result else 0
+        if is_ta:
+            reply = f"**{scope_name}** பங்கில் **{target_cnt} திருவருட்சாதனங்கள்** பெற்ற உறுப்பினர்கள் மொத்தம் **{val} பேர்** பதிவு செய்யப்பட்டுள்ளனர்."
+            if target_cnt > 4:
+                reply += "\n\n*(குறிப்பு: பங்கு பதிவேட்டில் திருமுழுக்கு, முதல் நற்கருணை, உறுதிப்பூசுதல் மற்றும் திருமணம் ஆகிய 4 திருவருட்சாதனங்கள் மட்டுமே பதிவு செய்யப்படுகின்றன).* "
+        else:
+            reply = f"There are currently **{val} members** registered in **{scope_name}** who have received **{target_cnt} sacraments**."
+            if target_cnt > 4:
+                reply += "\n\n*(Note: In the parish registry, up to 4 sacraments are recorded for parishioners: Baptism, First Holy Communion, Confirmation, and Holy Matrimony).*"
+
+        return {
+            "reply": reply,
+            "data": [{"Category": f"Members with {target_cnt} Sacraments ({scope_name})", "Count": val}],
+            "record_count": val,
+            "suggested_questions": [
+                "List any 10 members who got 3 Sacraments",
+                "How many members are in each BCC?",
+                "Give the gender-wise member count"
+            ]
+        }
+
+    # 5. Filtered Member Count (Age / Gender / Single Count)
     if entity == "MEMBER" and metric == "COUNT":
         val = int(sql_result[0].get("total", sql_result[0].get("total_members", 0))) if sql_result else 0
         

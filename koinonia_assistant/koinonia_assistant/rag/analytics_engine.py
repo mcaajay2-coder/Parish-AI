@@ -572,7 +572,8 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
     scope = q_info.get("scope", "GENERAL_QUERY")
     person_name = q_info.get("person_name")
 
-    m_sac_count = re.search(r"\b(?:who\s+)?(?:got|received|have|with|having)\s+(\d+)\s+(?:sacraments?|sacrements?)\b", q_low)
+    sac_kw_pattern = r"(?:sacraments?|sacrements?|sacremenets?|sacrametns?|sacramnets?|sacrments?)"
+    m_sac_count = re.search(r"\b(?:who\s+)?(?:are\s+|is\s+|have\s+|having\s+|has\s+|got\s+|received\s+|with\s+)*(?:got|received|have|with|having)\s+(\d+)\s+" + sac_kw_pattern + r"\b", q_low) or re.search(r"\b(\d+)\s+" + sac_kw_pattern + r"\b", q_low) or re.search(r"(\d+)\s+(?:திருவருட்சாதனங்கள்|அருட்சாதனங்கள்|சாதனங்கள்)", q_low)
 
     # Priority 1: Specific Person Name or Family Card / Member ID Lookup (e.g. "Show all sacrament details of Adaikala Abinaya A")
     if (person_name and not m_sac_count) or re.search(r"\b(?:YLG/\d+|family\s+id|member\s+id|\d{4,5})\b", question, re.IGNORECASE):
@@ -593,7 +594,24 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             "speed_tier": "FAST",
         }
 
-    # Priority 2: Qualified Member Sacrament List (e.g. "List any 10 members who got 3 Sacrements")
+    # Priority 2A: Sacrament Count Query (e.g. "how many membrs are got 5 sacremenets")
+    is_sac_count_query = bool(re.search(r"\b(?:how\s+many|count|number\s+of|total)\b", q_low) or any(k in q_low for k in ["எத்தனை", "மொத்தம்", "எண்ணிக்கை"]))
+    if m_sac_count and is_sac_count_query:
+        target_sac_cnt = int(m_sac_count.group(1))
+        return {
+            **base_meta,
+            "normalized_query": f"INTENT=MEMBER_STATISTICS | SAC_COUNT={target_sac_cnt}",
+            "intent_query": "MEMBER_STATISTICS",
+            "entity_query": "MEMBER",
+            "intent": "MEMBER_STATISTICS",
+            "sub_intent": "MEMBER_STATISTICS",
+            "speed_tier": "FAST",
+            "sacrament_count_filter": target_sac_cnt,
+            "filters": {"sacrament_count": target_sac_cnt},
+            "metrics": metrics,
+        }
+
+    # Priority 2B: Qualified Member Sacrament List (e.g. "List any 10 members who got 3 Sacrements")
     if m_sac_count or (
         not person_name
         and re.search(r"^\s*(?:list|show|give|display|get)\b", q_low)
