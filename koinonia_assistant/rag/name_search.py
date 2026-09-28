@@ -242,6 +242,26 @@ def validate_candidate_hard_constraints(candidate: dict, constraints: dict) -> t
         if norm_req_p not in cand_parish and cand_parish not in norm_req_p:
             reasons.append(f"registered in '{candidate.get('parish_id')}', not '{req_parish}'")
 
+    # 4. Address / Street Constraint
+    req_addr = constraints.get("address")
+    if req_addr:
+        cand_addr = (candidate.get("family_address") or candidate.get("street") or "").strip().lower()
+        norm_req = re.sub(r'[\.,\-_/\\\'"]', ' ', req_addr.strip().lower())
+        norm_req = re.sub(r'\s+', ' ', norm_req).strip()
+        norm_cand = re.sub(r'[\.,\-_/\\\'"]', ' ', cand_addr)
+        norm_cand = re.sub(r'\s+', ' ', norm_cand).strip()
+
+        addr_matched = False
+        if norm_req and norm_cand:
+            if norm_req in norm_cand or norm_cand in norm_req:
+                addr_matched = True
+            elif fuzz.partial_ratio(norm_req, norm_cand) >= 85:
+                addr_matched = True
+
+        if not addr_matched:
+            disp_addr = candidate.get("family_address") or candidate.get("street") or "N/A"
+            reasons.append(f"residing at '{disp_addr}', not '{req_addr}'")
+
     is_valid = (len(reasons) == 0)
     return is_valid, reasons
 
@@ -269,6 +289,7 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
         "identifier_type": None,
         "member_id": None,
         "parish": None,
+        "address": None,
         "year": None,
         "sacrament": None,
         "intent": "GENERAL_MEMBER",
@@ -375,6 +396,30 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
             working_q = working_q[:m_parish.start()] + " " + working_q[m_parish.end():]
             working_q = re.sub(r'\s+', ' ', working_q).strip()
 
+    # 3b. Address / Street / Landmark Constraint
+    matched_addr = None
+    m_near = re.search(r'\b(?:from\s+|at\s+|in\s+|residing\s+at\s+|staying\s+at\s+|living\s+in\s+)?(near\s+[A-Za-z0-9\s]+?\b(?:Bank|Lodge|Church|School|Hospital|Post\s*Office|Bus\s*Stand|Station)\b)', working_q, re.IGNORECASE) or re.search(r'\b(?:from\s+|at\s+|in\s+|residing\s+at\s+|staying\s+at\s+|living\s+in\s+)?(near\s+[A-Za-z0-9\s]+?)(?:\s+(?:family|household|details|status|records?|\?|$))', working_q, re.IGNORECASE)
+    m_door = re.search(r'\b(?:from\s+|at\s+|in\s+|residing\s+at\s+|staying\s+at\s+|living\s+in\s+|door\s*no\.?\s*|house\s*no\.?\s*|d\s*no\.?\s*)(\d+[-/]\d+[A-Za-z]?)\b', working_q, re.IGNORECASE)
+    m_street = re.search(r'\b(?:from\s+|at\s+|in\s+|residing\s+at\s+|staying\s+at\s+|living\s+in\s+)?([0-9A-Za-z\s,\.\-/]+?\s+(?:Street|Road|Lane|Nagar|Garden|Colony))\b', working_q, re.IGNORECASE)
+
+    if m_near:
+        cand_addr = m_near.group(1).strip()
+        matched_addr = cand_addr
+        working_q = working_q[:m_near.start()] + " " + working_q[m_near.end():]
+        working_q = re.sub(r'\s+', ' ', working_q).strip()
+    elif m_door:
+        cand_addr = m_door.group(1).strip()
+        matched_addr = cand_addr
+        working_q = working_q[:m_door.start()] + " " + working_q[m_door.end():]
+        working_q = re.sub(r'\s+', ' ', working_q).strip()
+    elif m_street:
+        cand_addr = m_street.group(1).strip()
+        matched_addr = cand_addr
+        working_q = working_q[:m_street.start()] + " " + working_q[m_street.end():]
+        working_q = re.sub(r'\s+', ' ', working_q).strip()
+
+    constraints["address"] = matched_addr
+
     constraints["stripped_query"] = working_q
 
     # 4. Intent & Scope extraction
@@ -447,6 +492,8 @@ def extract_query_entities_and_constraints(query_text: str, user_parish: str = N
     # Final cleanup
     clean_p = re.sub(r'(?:\'s|’s)$', '', clean_p).strip()
     clean_p = re.sub(r'^(?:the|a|an|parishioner|member)\s+', '', clean_p, flags=re.IGNORECASE).strip()
+    clean_p = re.sub(r'\s+(?:from|at|in|near)$', '', clean_p, flags=re.IGNORECASE).strip()
+    clean_p = re.sub(r'^(?:from|at|in|near)\s+', '', clean_p, flags=re.IGNORECASE).strip()
     clean_p = re.sub(r'\s+', ' ', clean_p).strip()
 
     constraints["person_name"] = clean_p if clean_p else None
@@ -1834,21 +1881,34 @@ def compute_member_similarity(norm_query: str, norm_full: str) -> tuple[float, s
             fuzz.ratio(q_phon, phonetic_normalize(m_base.replace(" ", "")))
         )
         if len(m_tokens) >= 2 and spaceless_sim >= 92.0:
-            score = spaceless_sim - init_penalty
+            score = min(95.0, spaceless_sim * 0.95) - init_penalty
             return round(score, 1), "COMPOUND_BASE"
 
-        # If the user ALSO provided a matching initial (e.g. "Antony S" or "Selvam A")
-        if len(m_tokens) == 1 and q_inits and set(q_inits) == set(m_inits):
-            raw = max(fuzz.ratio(q_tok, m_tokens[0]), fuzz.ratio(q_phon, m_phon_tokens[0]) * 0.96)
-            return round(raw, 1), ("EXACT_BASE" if raw >= 95.0 else "PHONETIC_BASE")
+        # Exact or close single-word base match (e.g. "antonyraj" vs "Antonyraj S", or "roselin" vs "Roselin A")
+        if len(m_tokens) == 1:
+            base_exact = fuzz.ratio(q_tok, m_tokens[0])
+            base_phon = fuzz.ratio(q_phon, m_phon_tokens[0])
+            raw = max(base_exact, base_phon * 0.96)
+            if raw >= 92.0:
+                if q_inits:
+                    if set(q_inits) == set(m_inits):
+                        return 100.0, "EXACT_FULL"
+                    else:
+                        return round(100.0 - init_penalty, 1), "INITIAL_MISMATCH"
+                else:
+                    # If this single token is NOT a generic first-name prefix shared across multiple multi-token members
+                    # (e.g. "antonyraj" is a complete distinct name, while "antony" is shared with Antony Raj, Antony Selvan)
+                    if q_tok not in ('antony', 'anthony', 'joseph', 'mary', 'maria', 'john', 'peter', 'paul'):
+                        return round(98.5 - init_penalty, 1), "EXACT_BASE"
 
         # Un-initialed single-word query (e.g. "Antony")
         first_exact = fuzz.ratio(q_tok, m_tokens[0])
         first_phon = fuzz.ratio(q_phon, m_phon_tokens[0])
         first_tok_sim = max(first_exact, first_phon * 0.98)
+        is_subword_prefix = len(q_tok) >= 4 and (m_tokens[0].startswith(q_tok) or m_phon_tokens[0].startswith(q_phon))
 
-        if first_tok_sim >= 88.0:
-            # All members whose first given name is "Antony" (e.g. Antony Selvan P, Antony Raj S, Anthony S)
+        if first_tok_sim >= 88.0 or is_subword_prefix:
+            # All members whose first given name is "Antony" (e.g. Antony Selvan P, Antony Raj S, Anthony S, Antonyraj S)
             # receive comparable prefix scores (~81.5-83.0) so multiple "Antony ..." members trigger SHOW_CANDIDATES,
             # while a truly unique single given name in the parish still wins by score_gap >= 15.0.
             exact_bonus = 1.5 if first_exact == 100.0 else 0.0
@@ -2212,7 +2272,7 @@ def resolve_member_and_family(
     if action == "DIRECT_RESULT" and selected_member:
         fam_bundle = fetch_full_family_bundle(selected_member.family_id, selected_member.parish_id)
         sac_bundle = fetch_member_sacrament_bundle(selected_member.member_id, selected_member.parish_id)
-        card_str = selected_member.family_register_number or selected_member.family_id or ""
+        card_str = selected_member.family_card_number or selected_member.family_register_number or selected_member.family_id or ""
         anbiyam_str = selected_member.anbiyam or (fam_bundle.get("family") or {}).get("parish_bcc_id") or ""
         return {
             "status": "exact",
@@ -2224,6 +2284,8 @@ def resolve_member_and_family(
             "member_id": selected_member.member_id,
             "family_id": selected_member.family_id,
             "family_card": card_str,
+            "family_card_number": selected_member.family_card_number or "",
+            "family_register_number": selected_member.family_register_number or "",
             "parish_id": selected_member.parish_id,
             "anbiyam": anbiyam_str,
             "match_decision": decision,
@@ -2237,13 +2299,13 @@ def resolve_member_and_family(
         if input_mode == "voice":
             cand_list = cands_pool[:3]
         elif exact_match_count > 1:
-            cand_list = [exact_matches[0]]
+            cand_list = exact_matches[:3]
         else:
-            cand_list = [all_scored[0][2]] if all_scored else []
+            cand_list = cands_pool[:3] if cands_pool else ([all_scored[0][2]] if all_scored else [])
 
         top_candidates = []
         for m in cand_list:
-            card_str = m.family_register_number or m.family_id
+            card_str = m.family_card_number or m.family_register_number or m.family_id or ""
             cand_prompt, cand_display = build_candidate_prompt(query_text, person_name, m.full_name, card_str, scope=scope)
             m_score = next((s for s, c, cand in all_scored if cand.member_id == m.member_id), top_score)
             top_candidates.append({
@@ -2253,6 +2315,8 @@ def resolve_member_and_family(
                 "family_id": m.family_id,
                 "family_card": card_str,
                 "card_no": card_str,
+                "family_card_number": m.family_card_number or "",
+                "family_register_number": m.family_register_number or "",
                 "family_name": m.family_name or "Family",
                 "anbiyam": m.anbiyam or "",
                 "place": m.family_address or m.parish_id,

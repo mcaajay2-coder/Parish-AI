@@ -2057,7 +2057,7 @@ def database_lookup_node(state: GraphState) -> GraphState:
         }
 
     # 2. Standard LIST_MEMBERS / LIST_FAMILIES
-    if c_intent == "LIST":
+    if c_intent == "LIST" and not has_person_in_query:
         sub = intent_info.get("sub_intent")
         req_count = intent_info.get("limit", 10)
         name_filter = intent_info.get("filter")
