@@ -1,25 +1,3 @@
-from koinonia_assistant.rag.sacrament_normalizer import normalize_sacrament_query
-from koinonia_assistant.rag.tamil_utils import is_tamil, normalize_tamil_query
-from koinonia_assistant.rag.name_search import (
-    resolve_member_and_family,
-    extract_person_name_from_query,
-    extract_intent_and_person,
-    classify_query_intent,
-    handle_list_members,
-    handle_count_members,
-    handle_list_families,
-    handle_count_families,
-    format_family_response,
-    format_member_sacrament_response,
-    detect_query_intent,
-    fetch_full_family_bundle,
-    fetch_member_sacrament_bundle,
-    determine_response_scope,
-    render_scoped_response,
-    build_candidate_prompt,
-    RESERVED_GENERIC_WORDS,
-)
-import datetime
 import os
 import re
 import time
@@ -27,78 +5,103 @@ import json
 import psycopg2
 import pymysql
 import torch
-from typing import TypedDict, Any, Optional, Dict, List
+from typing import TypedDict, Any
 from dotenv import load_dotenv
 
+# Initialize LangSmith tracing environment BEFORE importing langchain/langgraph
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '.env')
+load_dotenv(dotenv_path)
 
-# ─── LangSmith Tracing Configuration ──────────────────────────────────────────
-def configure_langsmith():
-    """Ensure LangSmith tracing is active in the environment."""
-    api_key = os.environ.get("LANGCHAIN_API_KEY")
-    project = os.environ.get("LANGCHAIN_PROJECT")
-    tracing = os.environ.get("LANGCHAIN_TRACING_V2")
-
-    if not api_key:
+def _init_langsmith():
+    key = os.getenv("LANGCHAIN_API_KEY")
+    if not key:
         try:
             import frappe
             if hasattr(frappe, "conf") and frappe.conf:
-                api_key = frappe.conf.get("langchain_api_key")
-                project = project or frappe.conf.get("langchain_project")
-                if frappe.conf.get("langchain_tracing_v2") is not None:
-                    tracing = str(frappe.conf.get("langchain_tracing_v2")).lower()
+                key = frappe.conf.get("langchain_api_key")
         except Exception:
             pass
+    if key:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+        os.environ["LANGCHAIN_API_KEY"] = key
+        os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "koinonia_assistant")
 
-    if not api_key:
-        api_key = os.environ.get("LANGCHAIN_API_KEY", "")
+_init_langsmith()
 
-    os.environ["LANGCHAIN_TRACING_V2"] = tracing or "true"
-    os.environ["LANGCHAIN_API_KEY"] = api_key
-    os.environ["LANGCHAIN_PROJECT"] = project or "koinonia_assistant"
-    os.environ["LANGCHAIN_ENDPOINT"] = os.environ.get("LANGCHAIN_ENDPOINT") or "https://api.smith.langchain.com"
-    return True
+from rank_bm25 import BM25Okapi
+from sentence_transformers import CrossEncoder
 
-configure_langsmith()
+_cross_encoder = None
+def get_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        print("[CrossEncoder] Loading model...")
+        _cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    return _cross_encoder
 
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
 
-# Load environment variables
-dotenv_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '.env')
-load_dotenv(dotenv_path)
+MAX_RETRIES = 2
 
-# Initialize variables
-def _get_groq_key():
-    key = os.getenv("GROQ_API_KEY")
+# Initialize Groq multi-key pool
+def _get_groq_keys() -> list[str]:
+    keys = []
+    # 1. Check environment variables
+    env_keys = os.getenv("GROQ_API_KEYS") or os.getenv("GROQ_API_KEY")
+    if env_keys:
+        if "," in env_keys:
+            keys.extend([k.strip() for k in env_keys.split(",") if k.strip()])
+        else:
+            keys.append(env_keys.strip())
+
+    # 2. Check site_config.json
+    try:
+        import frappe
+        if hasattr(frappe, "conf") and frappe.conf:
+            conf_keys = frappe.conf.get("groq_api_keys")
+            if conf_keys and isinstance(conf_keys, list):
+                keys.extend(conf_keys)
+            elif conf_keys and isinstance(conf_keys, str):
+                keys.extend([k.strip() for k in conf_keys.split(",") if k.strip()])
+            
+            single_key = frappe.conf.get("groq_api_key")
+            if single_key and single_key not in keys:
+                keys.append(single_key)
+    except Exception:
+        pass
+
+    # Unique while preserving order
+    seen = set()
+    unique_keys = []
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            unique_keys.append(k)
+
+    return unique_keys or [os.getenv("GROQ_API_KEY", "")]
+
+GROQ_API_KEYS = _get_groq_keys()
+_current_key_idx = 0
+
+def _setup_langsmith():
+    key = os.getenv("LANGCHAIN_API_KEY")
     if not key:
         try:
             import frappe
             if hasattr(frappe, "conf") and frappe.conf:
-                key = frappe.conf.get("groq_api_key")
+                key = frappe.conf.get("langchain_api_key")
         except Exception:
             pass
-    return key
+    if key:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+        os.environ["LANGCHAIN_API_KEY"] = key
+        os.environ["LANGCHAIN_PROJECT"] = "koinonia_assistant"
 
-def _get_groq_model():
-    model = os.getenv("GROQ_MODEL")
-    if not model:
-        try:
-            import frappe
-            if hasattr(frappe, "conf") and frappe.conf:
-                model = frappe.conf.get("groq_model")
-        except Exception:
-            pass
-    m = (model or "openai/gpt-oss-20b").strip()
-    if m in ["gpt-oss-20b", "openai-gpt-oss-20b"]:
-        m = "openai/gpt-oss-20b"
-    elif m in ["gpt-oss-120b", "openai-gpt-oss-120b"]:
-        m = "openai/gpt-oss-120b"
-    return m
-
-GROQ_API_KEY = _get_groq_key() or "placeholder_key"
-GROQ_MODEL = _get_groq_model()
-MAX_RETRIES = 3
+_setup_langsmith()
 
 # pgvector Connection
 PG_CONFIG = {
@@ -130,9 +133,75 @@ def embed_text(text: str) -> list[float]:
         output = model(**inputs)
     return output.last_hidden_state.mean(dim=1).squeeze().tolist()
 
-# Groq LLM with Transparent Key & Model Rotator
-from koinonia_assistant.rag.llm_rotator import get_llm_rotator
-llm = get_llm_rotator(temperature=0, default_model=GROQ_MODEL)
+def invoke_llm_with_rotation(prompt_messages):
+    global _current_key_idx
+    total_keys = len(GROQ_API_KEYS)
+    
+    # Format messages to ensure there is always a human/user message for Qwen/OSS models
+    formatted_messages = []
+    if isinstance(prompt_messages, str):
+        formatted_messages = [("human", prompt_messages)]
+    elif isinstance(prompt_messages, list):
+        has_human = any((m[0] in ["human", "user"] if isinstance(m, tuple) else getattr(m, 'type', '') in ["human", "user"]) for m in prompt_messages)
+        if not has_human:
+            formatted_messages = []
+            for i, m in enumerate(prompt_messages):
+                if i == len(prompt_messages) - 1:
+                    role = "human"
+                    content = m[1] if isinstance(m, tuple) else m.content
+                else:
+                    role = m[0] if isinstance(m, tuple) else m.type
+                    content = m[1] if isinstance(m, tuple) else m.content
+                formatted_messages.append((role, content))
+        else:
+            formatted_messages = prompt_messages
+    else:
+        formatted_messages = prompt_messages
+    
+    default_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    models_to_try = [
+        default_model,
+        "llama-3.1-8b-instant",
+        "qwen/qwen3.8-27b",
+        "qwen/qwen3.6-27b",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b"
+    ]
+    # Remove duplicates preserving order
+    seen_models = set()
+    models_to_try = [m for m in models_to_try if not (m in seen_models or seen_models.add(m))]
+    
+    for model_name in models_to_try:
+        for attempt in range(total_keys):
+            idx = (_current_key_idx + attempt) % total_keys
+            key = GROQ_API_KEYS[idx]
+            try:
+                client = ChatGroq(model=model_name, temperature=0, groq_api_key=key, max_retries=1)
+                resp = client.invoke(formatted_messages)
+                _current_key_idx = idx
+                if hasattr(resp, 'content') and isinstance(resp.content, str):
+                    resp.content = re.sub(r'<think>.*?</think>', '', resp.content, flags=re.DOTALL).strip()
+                return resp
+            except Exception as e:
+                err_str = str(e)
+                print(f"[Groq Rotator] {model_name} error on key #{idx+1} ({key[:10]}...): {err_str[:80]}... Rotating...")
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    time.sleep(1.0)
+
+    raise RuntimeError("All Groq API keys and models exhausted their rate limits.")
+
+# Groq LLM instance for standard fallback chaining
+primary_llm = ChatGroq(
+    model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+    temperature=0,
+    groq_api_key=GROQ_API_KEYS[0] if GROQ_API_KEYS else None,
+)
+fallback_llm = ChatGroq(
+    model="openai/gpt-oss-120b",
+    temperature=0,
+    groq_api_key=GROQ_API_KEYS[0],
+)
+llm = primary_llm.with_fallbacks([fallback_llm])
 
 # ─── pgvector Schema and History Retrieval ────────────────────────────────────
 
@@ -179,7 +248,7 @@ Candidates:
 Return the selected table names as a comma-separated list. Do not write any explanation, markdown, or code blocks. Just return the table names, e.g. "tabFamily, tabMember"."""
 
     try:
-        response = llm.invoke([("user", prompt)])
+        response = invoke_llm_with_rotation([("system", prompt)])
         content = response.content.strip()
         selected = [t.strip().strip("`").strip("'").strip('"') for t in content.split(",")]
         candidate_names = {c[0] for c in candidates}
@@ -191,89 +260,150 @@ Return the selected table names as a comma-separated list. Do not write any expl
         
     return [c[0] for c in candidates[:2]]
 
-def fetch_relevant_schemas(original_query: str, enhanced_query: str, query_embedding: list[float], k: int = 3) -> str:
+def fetch_relevant_schemas(original_query: str, enhanced_query: str, query_embedding: list[float], k: int = 2) -> str:
     conn = psycopg2.connect(**PG_CONFIG)
     candidates = []
     seen = set()
-    
     combined_query_text = f"{original_query} {enhanced_query}"
     
     try:
         with conn.cursor() as cur:
-            # 1. Substring matching for custom tables
             cur.execute("SELECT table_name, schema_ddl FROM koinonia_table_schemas;")
             all_tables = cur.fetchall()
+            
+            docs = []
+            doc_to_table = {}
             for tname, ddl in all_tables:
-                clean_t = tname.lower()
-                if clean_t.startswith("tab"):
-                    clean_t = clean_t[3:]
+                doc = f"{tname} {ddl}".lower()
+                docs.append(doc)
+                doc_to_table[doc] = (tname, ddl)
                 
-                # Support "anointing of sick", "anointing", "sick", "marriage", "baptism", "communion", "confirmation", "death", "member", "family"
-                match_keywords = [clean_t, clean_t.replace("_", " ")]
-                if any(kw in combined_query_text.lower() for kw in match_keywords):
+            if docs:
+                tokenized_docs = [doc.split() for doc in docs]
+                bm25 = BM25Okapi(tokenized_docs)
+                tokenized_query = combined_query_text.lower().split()
+                bm25_scores = bm25.get_scores(tokenized_query)
+                
+                top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:5]
+                for idx in top_bm25_indices:
+                    tname, ddl = doc_to_table[docs[idx]]
                     if tname not in seen:
                         seen.add(tname)
                         candidates.append((tname, ddl))
-
-            # 2. Semantic vector search (Priority 2)
+            
             cur.execute("""
                 SELECT table_name, schema_ddl
                 FROM koinonia_table_schemas
                 ORDER BY embedding <=> %s::vector
-                LIMIT %s;
-            """, (query_embedding, k))
+                LIMIT 5;
+            """, (query_embedding,))
             for tname, ddl in cur.fetchall():
                 if tname not in seen:
                     seen.add(tname)
                     candidates.append((tname, ddl))
                     
-        selected_table_names = rerank_tables(original_query, candidates)
-        schema_map = {tname: ddl for tname, ddl in candidates}
+        if candidates:
+            ce = get_cross_encoder()
+            pairs = [[combined_query_text, f"{tname} {ddl}"] for tname, ddl in candidates]
+            scores = ce.predict(pairs)
+            
+            scored_candidates = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+            top_candidates = [cand for score, cand in scored_candidates[:k]]
+        else:
+            top_candidates = []
+            
+        selected_table_names = rerank_tables(original_query, top_candidates)
+        schema_map = {tname: ddl for tname, ddl in top_candidates}
         final_results = []
         for tname in selected_table_names:
             if tname in schema_map:
                 final_results.append((tname, schema_map[tname]))
                 
+    except Exception as e:
+        print("[RAG Context] Error fetching relevant schemas:", e)
+        final_results = []
     finally:
         conn.close()
         
     pruned_results = []
-    for tname, ddl in final_results:
-        pruned_results.append(f"{tname}:\n{ddl}")
+    system_cols = ["_user_tags", "_comments", "_assign", "_liked_by", "amended_from", "idx", "docstatus", "creation", "modified", "modified_by", "owner", "custom", "primary key", "key `", "unique key", "constraint", "engine=", "default charset="]
+    for tname, ddl in final_results[:2]:
+        clean_lines = []
+        for line in ddl.split("\n"):
+            line_str = line.strip()
+            if not line_str or line_str.startswith("--"):
+                continue
+            if not any(sc in line_str.lower() for sc in system_cols):
+                clean_lines.append(line_str)
+        pruned_results.append(f"Table `{tname}`:\n" + "\n".join(clean_lines[:8]))
         
     return pruned_results
 
-def fetch_relevant_fields(query_embedding: list[float], k: int = 5) -> list[str]:
+def fetch_relevant_fields(query_embedding: list[float], combined_query_text: str, k: int = 3) -> list[str]:
     conn = psycopg2.connect(**PG_CONFIG)
-    results = []
+    candidates = []
+    seen = set()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT table_name, field_name, field_type, field_label, description FROM koinonia_field_schemas;")
+            all_fields = cur.fetchall()
+            
+            docs = []
+            doc_to_row = {}
+            for row in all_fields:
+                doc = f"{row[0]} {row[1]} {row[2]} {row[3]} {row[4]}".lower()
+                docs.append(doc)
+                doc_to_row[doc] = row
+                
+            if docs:
+                tokenized_docs = [doc.split() for doc in docs]
+                bm25 = BM25Okapi(tokenized_docs)
+                tokenized_query = combined_query_text.lower().split()
+                bm25_scores = bm25.get_scores(tokenized_query)
+                
+                top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:10]
+                for idx in top_bm25_indices:
+                    row = doc_to_row[docs[idx]]
+                    row_str = f"- Table `{row[0]}`, Column `{row[1]}` (Type: {row[2]}, Label: {row[3]}): {row[4]}"
+                    if row_str not in seen:
+                        seen.add(row_str)
+                        candidates.append((row_str, row))
+            
             cur.execute("""
-                SELECT table_name, field_name, field_type, field_label, description,
-                       (embedding <=> %s::vector) as distance
+                SELECT table_name, field_name, field_type, field_label, description
                 FROM koinonia_field_schemas
-                ORDER BY distance ASC
-                LIMIT %s;
-            """, (query_embedding, k))
+                ORDER BY embedding <=> %s::vector
+                LIMIT 10;
+            """, (query_embedding,))
             for row in cur.fetchall():
-                results.append(f"- Table `{row[0]}`, Column `{row[1]}` (Type: {row[2]}, Label: {row[3]}): {row[4]}")
+                row_str = f"- Table `{row[0]}`, Column `{row[1]}` (Type: {row[2]}, Label: {row[3]}): {row[4]}"
+                if row_str not in seen:
+                    seen.add(row_str)
+                    candidates.append((row_str, row))
+                    
+        if candidates:
+            ce = get_cross_encoder()
+            pairs = [[combined_query_text, c[0]] for c in candidates]
+            scores = ce.predict(pairs)
+            scored_candidates = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+            results = [cand[0] for score, cand in scored_candidates[:k]]
+        else:
+            results = []
+            
     except Exception as e:
         print("[RAG Context] Error fetching relevant fields:", e)
+        results = []
     finally:
         conn.close()
     return results
 
-def fetch_few_shot_examples(query_embedding: list[float], k: int = 2) -> str:
+def fetch_few_shot_examples(query_embedding: list[float], k: int = 1) -> str:
     lines = [
-        "Here are examples of correct sacrament question → SQL mappings:",
-        "  Q: \"List members of family FAM-2011-00001 along with their relations and age\"",
-        "  SQL: SELECT first_name, last_name, relationship_id, age FROM tabMember WHERE family_id = 'FAM-2011-00001'",
+        "Example Mappings:",
         "  Q: \"Count how many baptisms were conducted in Holy Cross Parish during 2024\"",
         "  SQL: SELECT COUNT(*) FROM tabBaptism WHERE bapt_parish_id = 'Holy Cross Parish' AND YEAR(bapt_date) = 2024",
-        "  Q: \"Show communion sacrament details for child Mary Britto\"",
-        "  SQL: SELECT c.name, c.first_name, c.last_name, c.fhc_date, c.fhc_place FROM tabCommunion c WHERE c.first_name = 'Mary' AND c.last_name = 'Britto'",
-        "  Q: \"List marriages in 2023 solemnized by Rev. Fr. Stephen Raj\"",
-        "  SQL: SELECT name, bridegroom_name, bride_name, mrg_date FROM tabMarriage WHERE mrg_minister = 'Rev. Fr. Stephen Raj' AND YEAR(mrg_date) = 2023"
+        "  Q: \"Tell me about Paul Amalraj S.\"",
+        "  SQL: SELECT first_name, middle_name, last_name, dob, gender, living_status, parish_id, mobile FROM tabMember WHERE (first_name = 'Paul' AND middle_name = 'Amalraj' AND last_name = 'S.') OR CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%Paul%Amalraj%'"
     ]
     
     conn = psycopg2.connect(**PG_CONFIG)
@@ -294,7 +424,7 @@ def fetch_few_shot_examples(query_embedding: list[float], k: int = 2) -> str:
         conn.close()
         
     if rows:
-        lines.append("\nDynamic Examples from History:")
+        lines.append("\nDynamic History Examples:")
         for q, s in rows:
             lines.append(f'  Q: "{q}"\n  SQL: {s}')
             
@@ -344,395 +474,10 @@ def update_correctness_flag(query_id: int, is_correct: int):
 
 # ─── LangGraph State Definition ───────────────────────────────────────────────
 
-
-# ????????? Disambiguation & Phonetic Helpers ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-
-SACRAMENT_INTENTS = {
-    'baptism': ['baptism', 'baptised', 'baptized', 'bapt', 'babt', 'christening', 'ஞானஸ்நானம்', 'திருமுழுக்கு', 'ஞானஸ்தானம்'],
-    'marriage': ['marriage', 'married', 'wedding', 'matrimony', 'mrg', 'திருமணம்', 'கல்யாணம்', 'விவாகம்'],
-    'communion': ['communion', 'first communion', 'first holy communion', 'eucharist', 'fhc', 'first', 'holy', 'puthunanmai', 'pothunanmai', 'puthunamai', 'pothunamai', 'puthunmai', 'pothunmai', 'புதுநன்மை', 'பொதுநன்மை', 'போதுநன்மை', 'pathi', 'sollunga', 'solunga', 'patri', 'patti', 'puthunanmai', 'pothunanmai', 'puthunamai', 'pothunamai', 'நற்கருணை', 'முதல் நற்கருணை', 'புதுநன்மை', 'பொதுநன்மை'],
-    'confirmation': ['confirmation', 'confirmed', 'chrismation', 'cnf', 'உறுதிப்பூசுதல்', 'உறுதிபூசுதல்', 'திடப்படுத்தல்'],
-    'death': ['death', 'died', 'deceased', 'funeral', 'burial', 'cemetery', 'இறப்பு', 'மரணம்', 'அடக்கம்'],
-    'sacraments': ['sacrament', 'sacraments', 'all sacraments', 'records', 'திருவருட்சாதனம்', 'திருவருட்சாதனங்கள்']
-}
-
-SACRAMENT_STOPWORDS = {
-    'baptism', 'baptised', 'baptized', 'bapt', 'babt', 'christening',
-    'ஞானஸ்நானம்', 'திருமுழுக்கு', 'ஞானஸ்தானம்', 'ஞானஸ்நான', 'திருமுழுக்குத்',
-    'marriage', 'married', 'wedding', 'matrimony', 'mrg',
-    'திருமணம்', 'கல்யாணம்', 'விவாகம்', 'திருமண',
-    'communion', 'first communion', 'first holy communion', 'eucharist', 'fhc', 'first', 'holy', 'puthunanmai', 'pothunanmai', 'puthunamai', 'pothunamai', 'puthunmai', 'pothunmai', 'புதுநன்மை', 'பொதுநன்மை', 'போதுநன்மை', 'pathi', 'sollunga', 'solunga', 'patri', 'patti',
-    'நற்கருணை', 'முதல் நற்கருணை', 'திவ்விய நற்கருணை', 'புது நன்மை', 'நற்கருணைப்',
-    'confirmation', 'confirmed', 'chrismation', 'cnf',
-    'உறுதிப்பூசுதல்', 'உறுதிபூசுதல்', 'உறுதிப் பூசுதல்',
-    'death', 'died', 'deceased', 'funeral', 'burial', 'cemetery',
-    'மரண பதிவு', 'மரண', 'இறப்பு', 'அடக்கம்', 'கல்லறை',
-    'sacrament', 'sacraments', 'all sacraments', 'records',
-    'திருவருட்சாதனம்', 'திருவருட்சாதனங்கள்', 'அருட்சாதனம்', 'அருட்சாதனங்கள்', 'தேவத்திரவிய அனுமானம்'
-}
-
-TAMIL_STOPWORDS = {
-    'குடும்பம்', 'குடும்பங்கள்', 'குடும்ப', 'குடும்பத்தின்', 'குடும்பத்தினர்',
-    'உறுப்பினர்', 'உறுப்பினர்கள்', 'அங்கத்தினர்', 'விவரம்', 'விவரங்கள்',
-    'தகவல்', 'பங்கு', 'பங்கின்', 'மறைமாவட்டம்', 'அட்டை', 'பதிவு', 'எண்',
-    'ஏன்', 'அப்படி', 'வருது', 'வருகிறது', 'சொல்லு', 'சொல்லுங்க',
-    'தெரியுமா', 'எப்படி', 'என்ன', 'யாரு', 'யாருடைய', 'இருக்காங்க',
-    'இருக்க', 'இருக்கும்', 'காட்டு', 'கொடு', 'பத்தி', 'பற்றி',
-    'உள்ள', 'எடுக்க', 'பார்க்க', 'வேண்டும்', 'வேணும்'
-}
-
-GREETING_STOPWORDS = {
-    "hi", "hello", "hey", "hai", "hola", "namaste", "vanakkam", "வணக்கம்",
-    "good", "morning", "afternoon", "evening", "night", "gm", "gn",
-    "thanks", "thank", "you", "bye", "goodbye", "welcome", "ok", "okay",
-    "yes", "no", "yeah", "yep", "nope", "help", "sure", "fine", "great"
-}
-
-DISAMBIGUATION_STOPWORDS = {
-    'tell', 'me', 'about', 'the', 'family', 'families', 'household', 'member', 'members',
-    'details', 'detail', 'info', 'information', 'their', 'his', 'her', 'who',
-    'is', 'are', 'was', 'were', 'parishioner', 'parishioners', 'show', 'list', 'get', 'give',
-    'find', 'records', 'record', 'recurse', 'recourse', 'recorse', 'recods', 'rekords', 'rekord',
-    'all', 'in', 'parish', 'diocese', 'please',
-    'what', 'which', 'view', 'of', 'and', 'with', 'for', 'to', 'a', 'an',
-    'how', 'many', 'total', 'count', 'name', 'names', 'person', 'persons',
-    'similar', 'duplicate', 'same', 'one', 'more', 'have', 'has', 'had',
-    'certificate', 'certificates', 'register', 'registers', 'report', 'reports', 'status',
-    'generate', 'genenate', 'diagram', 'diagrams', 'chart', 'charts', 'graph', 'graphs',
-    'plot', 'plots', 'visualize', 'visualization', 'trend', 'trends', 'growth', 'growing',
-    'decline', 'increase', 'decrease', 'whether', 'weather', 'or', 'not', 'last', 'past',
-    'years', 'year', 'yearly', 'annual', 'annually', 'months', 'month', 'monthly',
-    'breakdown', 'distribution', 'percentage', 'ratio', 'comparison', 'compare',
-    'analytics', 'census', 'demographics', 'overview', 'summary', 'stats', 'statistics',
-    'why', 'so', 'like', 'that', 'this', 'coming', 'comes', 'come', 'shows', 'showing',
-    'does', 'do', 'did', 'it'
-}.union(SACRAMENT_STOPWORDS).union(TAMIL_STOPWORDS).union(GREETING_STOPWORDS).union(RESERVED_GENERIC_WORDS)
-
-def extract_search_terms(query_text: str):
-    clean = re.sub(r"\(\s*ID:\s*[^)]+\)", "", query_text, flags=re.IGNORECASE)
-    clean = re.sub(r"\b(?:FAM|MEM)-[A-Za-z0-9\-]+\b", "", clean, flags=re.IGNORECASE)
-    words = re.findall(r"[A-Za-z0-9\.\u0B80-\u0BFF]+", clean)
-    filtered = []
-    for w in words:
-        w_clean = w.strip(".")
-        w_lower = w_clean.lower()
-        if w_lower in DISAMBIGUATION_STOPWORDS:
-            continue
-        if re.search(r"[\u0B80-\u0BFF]", w_clean):
-            if len(w_clean) > 1:
-                filtered.append(w_clean)
-        else:
-            if len(w_clean) >= 2 or (len(w_clean) == 1 and w_clean.isalpha()):
-                filtered.append(w_clean)
-    return filtered
-
-def get_phonetic_variants(token: str):
-    t = token.lower().strip()
-    variants = [t]
-    if 'thony' in t or 'tony' in t or t.startswith(('anto', 'antho')) or 'அந்தோ' in t:
-        variants.extend(['anton', 'anthony', 'antony', 'anto', 'antho', 'அந்தோணி', 'அந்தோனி', 'அந்தோணிராஜ்', 'அந்தோனிராஜ்'])
-    if t.startswith(('selv', 'silv')) or 'செல்வ' in t or 'சில்வ' in t:
-        variants.extend(['selvan', 'selvam', 'selva', 'silva', 'silvan', 'silvam', 'selvaraj', 'செல்வம்', 'செல்வன்', 'செல்வராஜ்', 'சில்வா'])
-    elif t.endswith(('vam', 'van', 'va')):
-        stem = t[:-3] if len(t) > 3 else t
-        variants.extend([stem + 'vam', stem + 'van', stem + 'va'])
-    if t.endswith(('raj', 'raja', 'rajan')):
-        stem = t[:-3] if len(t) > 3 else t
-        variants.extend([stem + 'raj', stem + 'raja', stem + 'rajan'])
-    if 'babu' in t:
-        variants.extend(['babu', 'baabu'])
-    if 'samy' in t or 'swamy' in t:
-        variants.extend(['samy', 'swamy', 'sammy'])
-    if 'mari' in t or 'mary' in t or 'மரி' in t or 'மேரி' in t:
-        variants.extend(['maria', 'mary', 'mari', 'மரியா', 'மேரி'])
-    if 'jose' in t or 'ஜோசப்' in t or 'சூசை' in t:
-        variants.extend(['joseph', 'jose', 'jos', 'ஜோசப்', 'சூசை'])
-    if 'paul' in t:
-        variants.extend(['paul', 'paulose'])
-    if 'francis' in t or 'பிரான்சிஸ்' in t:
-        variants.extend(['francis', 'fransis', 'பிரான்சிஸ்'])
-    if 'xavier' in t or 'savari' in t or 'சவேரி' in t or 'சேவியர்' in t:
-        variants.extend(['xavier', 'savari', 'saveri', 'சவேரியார்', 'சேவியர்'])
-    if 'yash' in t:
-        variants.extend(['yash', 'yaash'])
-    return list(set(variants))
-
-def ensure_frappe_connected():
-    try:
-        import frappe
-        if not frappe.db:
-            frappe.connect()
-    except Exception:
-        pass
-
-def find_disambiguation_candidates(query_text: str, user_parish: str = None, user_diocese: str = None):
-    # If query already contains explicit ID, do not disambiguate
-    if (
-        re.search(r"\b(FAM-[A-Z0-9\-]+|MEM-[A-Z0-9\-]+)\b", query_text, re.IGNORECASE) or
-        re.search(r"\b(?:Member\s*ID|Member)[:\s]+[0-9]+\b", query_text, re.IGNORECASE) or
-        re.search(r"\b(?:Family\s*ID|Family)[:\s]+[0-9]+\b", query_text, re.IGNORECASE) or
-        re.search(r"\bCard[:\s]+[A-Z0-9/]+\b", query_text, re.IGNORECASE)
-    ):
-        return None
-
-    # Do not disambiguate greetings, chitchat, or basic conversational queries
-    q_lower = query_text.lower()
-    GREETINGS_SET = {
-        "hi", "hello", "hey", "hai", "hola", "namaste", "vanakkam", "வணக்கம்",
-        "good morning", "good afternoon", "good evening", "good night", "gm", "gn",
-        "thanks", "thank you", "bye", "goodbye", "ok", "okay", "yes", "no", "help"
-    }
-    q_stripped = re.sub(r"[^\w\s\u0B80-\u0BFF]", "", q_lower).strip()
-    if q_stripped in GREETINGS_SET or any(phrase in q_lower for phrase in ["how are you", "who are you", "what can you do", "introduce yourself", "help me"]):
-        return None
-
-    # Do not disambiguate purely aggregate, analytical, chart, diagram, or trend questions
-    q_lower = query_text.lower()
-    AGGREGATE_ANALYTICAL_KEYWORDS = [
-        'how many', 'total', 'count', 'list all', 'statistics', 'stats', 'chart', 'charts',
-        'diagram', 'diagrams', 'graph', 'graphs', 'plot', 'plots', 'trend', 'trends',
-        'growing', 'growth', 'decline', 'increase', 'decrease', 'whether', 'weather',
-        'last 5 years', 'last 10 years', 'last 3 years', 'last year', 'past 5 years',
-        'years', 'yearly', 'annual', 'annually', 'monthly', 'by year', 'by month',
-        'summary', 'overview', 'across all', 'similar', 'same name', 'duplicate', 'homonym',
-        'distribution', 'breakdown', 'analytics', 'visualization', 'visualize',
-        'demographics', 'census', 'comparison', 'compare', 'percentage', 'ratio',
-        'ஒரே பெயர்', 'ஒரே மாதிரியான', 'வளர்ச்சி', 'விளக்கப்படம்', 'வரைபடம்', 'புள்ளிவிவரம்'
-    ]
-    if any(k in q_lower for k in AGGREGATE_ANALYTICAL_KEYWORDS):
-        return None
-
-    # 3-Level Member Matching in resolve_member_and_family handles all member/family disambiguation.
-    # Legacy substring LIKE '%term%' disambiguation is disabled per Section 7.
-    return None
-
-    terms = extract_search_terms(query_text)
-    if not terms or len(terms) > 5 or all(t.lower() in RESERVED_GENERIC_WORDS for t in terms):
-        return None
-
-    ensure_frappe_connected()
-    import frappe
-
-    # Base filters
-    fam_where = []
-    fam_params = []
-    if user_parish:
-        fam_where.append("f.parish_id LIKE %s")
-        fam_params.append(f"%{user_parish}%")
-    elif user_diocese and user_diocese != "All Dioceses":
-        fam_where.append("f.diocese_id = %s")
-        fam_params.append(user_diocese)
-
-    mem_where = []
-    mem_params = []
-    if user_parish:
-        mem_where.append("(m.parish_id LIKE %s OR f.parish_id LIKE %s)")
-        mem_params.extend([f"%{user_parish}%", f"%{user_parish}%"])
-    elif user_diocese and user_diocese != "All Dioceses":
-        mem_where.append("(m.diocese_id = %s OR f.diocese_id = %s)")
-        mem_params.extend([user_diocese, user_diocese])
-
-    # Search Families
-    term_fam_clauses = []
-    fam_search_params = list(fam_params)
-    for term in terms:
-        variants = get_phonetic_variants(term)
-        var_sql = " OR ".join(["f.reference LIKE %s" for _ in variants])
-        term_fam_clauses.append(f"({var_sql})")
-        for v in variants:
-            fam_search_params.append(f"%{v}%")
-
-    fam_rows = []
-    if term_fam_clauses:
-        where_str = " AND ".join(fam_where + ["(" + " OR ".join(term_fam_clauses) + ")"])
-        sql_fam = f"""
-            SELECT f.name, f.reference, f.family_register_number, f.street, f.parish_id, f.mobile
-            FROM `tabFamily` f
-            WHERE {where_str}
-            LIMIT 10
-        """
-        try:
-            fam_rows = frappe.db.sql(sql_fam, fam_search_params, as_dict=True)
-        except Exception:
-            fam_rows = []
-
-    # Search Members - match on first_name, middle_name, OR last_name individually
-    term_mem_clauses = []
-    mem_search_params = list(mem_params)
-    for term in terms:
-        variants = get_phonetic_variants(term)
-        # Match any individual name field OR the full concat OR family reference
-        per_variant = []
-        for v in variants:
-            per_variant.append(
-                "(m.first_name LIKE %s OR m.middle_name LIKE %s OR m.last_name LIKE %s "
-                "OR CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) LIKE %s "
-                "OR f.reference LIKE %s)"
-            )
-            mem_search_params.extend([f"%{v}%", f"%{v}%", f"%{v}%", f"%{v}%", f"%{v}%"])
-        term_mem_clauses.append("(" + " OR ".join(per_variant) + ")")
-
-    mem_rows = []
-    if term_mem_clauses:
-        where_str = " AND ".join(mem_where + ["(" + " OR ".join(term_mem_clauses) + ")"])
-        sql_mem = (
-            "SELECT m.name as member_id, "
-            "m.first_name, m.middle_name, m.last_name, "
-            "CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) as full_name, "
-            "m.family_id, m.street as mem_street, m.parish_id as mem_parish, "
-            "m.dob, m.relationship_id, "
-            "f.reference as fam_reference, f.family_register_number, "
-            "f.street as fam_street, f.parish_id as fam_parish "
-            "FROM `tabMember` m "
-            "LEFT JOIN `tabFamily` f ON f.name = m.family_id "
-            f"WHERE {where_str} "
-            "LIMIT 20"
-        )
-        try:
-            mem_rows = frappe.db.sql(sql_mem, mem_search_params, as_dict=True)
-        except Exception as e:
-            import frappe as _frappe
-            _frappe.log_error(f'[Disambiguation] Member search error: {e}')
-            mem_rows = []
-
-    # Compile options offering BOTH Family Details and Sacrament Retrieval
-    options = []
-    seen = set()
-
-    for r in fam_rows:
-        fid = r["name"]
-        fname = r["reference"] or "Family"
-        if fid not in seen:
-            seen.add(fid)
-            place = r["street"] or r["parish_id"] or user_parish or "Parish"
-            card_no = r["family_register_number"] or fid
-            
-            if sacrament_intent:
-                options.append({
-                    "type": "sacraments",
-                    "full_name": fname,
-                    "place": place,
-                    "card_no": card_no,
-                    "family_id": fid,
-                    "prompt": f"{query_text} (ID: {fid}, Card: {card_no})",
-                    "display_text": query_text
-                })
-            elif is_family_query:
-                options.append({
-                    "type": "family",
-                    "full_name": fname,
-                    "place": place,
-                    "card_no": card_no,
-                    "family_id": fid,
-                    "prompt": f"{query_text} (ID: {fid}, Card: {card_no})",
-                    "display_text": query_text
-                })
-            else:
-                options.append({
-                    "type": "family",
-                    "full_name": fname,
-                    "place": place,
-                    "card_no": card_no,
-                    "family_id": fid,
-                    "prompt": f"{query_text} (Family ID: {fid}, Card: {card_no})",
-                    "display_text": f"{fname} (Family)"
-                })
-
-    # Each matched member gets their OWN card (not grouped by family)
-    # so searching 'Laxmi' shows ALL members named Laxmi individually.
-    for mr in mem_rows:
-        mid = mr["member_id"]
-        if mid in seen:
-            continue
-        seen.add(mid)
-
-        mname = (mr["full_name"] or "").strip()
-        if not mname:
-            continue
-        fid = mr.get("family_id")
-        fam_ref = mr.get("fam_reference") or mname
-        card_no = mr.get("family_register_number") or fid or "N/A"
-        place = (mr.get("mem_street") or mr.get("fam_street")
-                 or mr.get("fam_parish") or user_parish or "Parish")
-
-        # Build a label showing which name part matched, e.g. 'Jose Antony (son)'
-        relation = mr.get("relationship_id") or ""
-        display_label = mname
-        if relation:
-            display_label = f"{mname} ({relation})"
-
-        if sacrament_intent:
-            # Show member's sacrament records
-            options.append({
-                "type": "sacraments",
-                "full_name": display_label,
-                "place": place,
-                "card_no": card_no,
-                "family_id": fid,
-                "member_id": mid,
-                "prompt": f"{query_text} for {mname} (Member ID: {mid}, Family: {fid})",
-                "display_text": f"{mname} — Sacraments"
-            })
-        elif is_family_query:
-            # Show the family this member belongs to
-            if fid and fid not in seen:
-                seen.add(fid)
-                options.append({
-                    "type": "family",
-                    "full_name": f"{fam_ref} (family of {mname})",
-                    "place": place,
-                    "card_no": card_no,
-                    "family_id": fid,
-                    "member_id": mid,
-                    "prompt": f"{query_text} (Family ID: {fid}, Card: {card_no})",
-                    "display_text": f"{fam_ref} (Family)"
-                })
-        else:
-            # General: ONE unified clickable card per member (keyed by member_id)
-            cand_prompt = build_candidate_prompt(query_text, None, mname, mid)
-            options.append({
-                "type": "member",
-                "full_name": display_label,
-                "place": place,
-                "card_no": card_no,
-                "family_id": fid,
-                "member_id": mid,
-                "prompt": cand_prompt,
-                "display_text": f"{mname} ({fam_ref})"
-            })
-
-    if len(options) > 1:
-        # Score options: options matching more query terms appear first
-        def score_opt(o):
-            fn = (o.get('full_name') or '').lower()
-            return sum(1 for t in terms if any(v in fn for v in get_phonetic_variants(t)))
-        options.sort(key=score_opt, reverse=True)
-
-        clean_terms = [t for t in terms if t.lower() not in SACRAMENT_STOPWORDS and t.lower() not in DISAMBIGUATION_STOPWORDS]
-        clean_term_display = ' '.join(clean_terms) if clean_terms else ' '.join(terms)
-        parish_label = f" in {user_parish}" if user_parish else ""
-        return {
-            "message": f"Multiple records found matching '{clean_term_display}'{parish_label}. Please select an option to view details:",
-            "options": options[:3]
-        }
-    elif len(options) == 1:
-        return {
-            "single_candidate": options[0]
-        }
-
-    return None
-
-
 class GraphState(TypedDict):
     question:          str
-    original_query:    str
-    detected_language: str
-    normalized_query:  str
-    intent_query:      str
-    entity_query:      str
-    canonical_terms:   Dict[str, Any]
-    final_response_language: str
     history:           list[dict[str, str]]
+    reference_text:    str
     route:             str
     enhanced_query:    str
     relevant_tables:   list[str]
@@ -746,2273 +491,1873 @@ class GraphState(TypedDict):
     retry_count:       int
     final_answer:      str
     history_id:        int
-    user_id:           Optional[str]
     user_role:         str
     user_parish:       str
-    user_diocese:      Optional[str]
-    authorization_context: Dict[str, Any]
-    authorization_check: str
-    authorization_result: str
-    sql_validation_result: str
-    authorized_record_count: int
-    request_id:        str
-    classified_intent: str
-    speed_tier:        str
-    intent_info:       Dict[str, Any]
-    deterministic_reply: Optional[str]
-    chart_data:        Optional[Dict[str, Any]]
-    disambiguation:    Optional[Dict[str, Any]]
-    suggested_questions: Optional[List[str]]
-    input_mode:        Optional[str]
-    original_transcript: Optional[str]
-    analysis_metadata: Optional[Dict[str, Any]]
-
-    # Section 32: Retrieval Fallback State
-    retrieval_status: Optional[str]
-    retrieval_failed: Optional[bool]
-    sql_fallback_required: Optional[bool]
-    sql_fallback_attempted: Optional[bool]
-    sql_fallback_result: Optional[Any]
-    
-    # Query Plan & Validation State
-    query_plan: Optional[Dict[str, Any]]
-    query_plan_valid: Optional[bool]
-    query_plan_validation_error: Optional[str]
-    sql_valid: Optional[bool]
-    database_result: Optional[Any]
-
-    # Section 11: SQL Self-Correction & Retry State
-    sql_retry_count: Optional[int]
-    sql_max_retries: Optional[int]
-    sql_retry_reason: Optional[str]
-    sql_previous_query: Optional[str]
-    sql_error: Optional[str]
-    sql_error_type: Optional[str]
-    sql_correction_attempt: Optional[bool]
-    sql_retry_exhausted: Optional[bool]
+    user_vicariate:    str
+    user_diocese:      str
+    user_parishes:     list[str]
+    user_member_id:    str
+    user_email:        str
+    requested_foreign_parish: str
+    requested_foreign_diocese: str
 
 # ─── Graph Nodes ──────────────────────────────────────────────────────────────
 
-def resolve_permissions_node(state: GraphState) -> GraphState:
-    """
-    MANDATORY STEP 0 SECURITY NODE (Sections 50–58, 73):
-    Executes BEFORE router, intent classification, SQL generation, vector search, or analytics.
-    Builds the central authorization_context and enforces explicit scope boundaries.
-    """
-    req_id = state.get("request_id", "N/A")
-    orig_q = state.get("original_query") or state["question"]
-    from koinonia_assistant.rag.tamil_utils import detect_query_language
-    from koinonia_assistant.rag.analytics_engine import (
-        build_authorization_context,
-        check_explicit_scope_violation,
-    )
-
-    lang = detect_query_language(orig_q)
-    auth_ctx = build_authorization_context(
-        user_id=state.get("user_id") or "User",
-        user_role=state.get("user_role") or "Parishioner",
-        user_parish=state.get("user_parish"),
-        user_diocese=state.get("user_diocese"),
-    )
-    scope_check = check_explicit_scope_violation(orig_q, auth_ctx, detected_language=lang)
-
-    print(
-        f"\n[LANGGRAPH] RESOLVE PERMISSIONS NODE | request_id={req_id} "
-        f"| user_id={auth_ctx['user_id']} | role={auth_ctx['role']} "
-        f"| scope_type={auth_ctx['scope_type']} | scope_name={auth_ctx['scope_name']} "
-        f"| auth_result={scope_check['authorization_result']} | lang={lang}"
-    )
-
-    if not scope_check["authorized"]:
-        return {
-            **state,
-            "original_query": orig_q,
-            "detected_language": lang,
-            "final_response_language": "ta" if lang == "ta" else "en",
-            "authorization_context": auth_ctx,
-            "authorization_check": "PRE_RETRIEVAL_SCOPE_ENFORCEMENT",
-            "authorization_result": scope_check["authorization_result"],
-            "sql_validation_result": "BLOCKED_PRE_EXECUTION",
-            "authorized_record_count": 0,
-            "route": "authorization_denied",
-            "classified_intent": "AUTHORIZATION_DENIED",
-            "speed_tier": "FAST",
-            "deterministic_reply": scope_check["message"],
-            "sql_result": [],
-            "generated_sql": "",
-        }
-
-    return {
-        **state,
-        "original_query": orig_q,
-        "detected_language": lang,
-        "final_response_language": "ta" if lang == "ta" else "en",
-        "authorization_context": auth_ctx,
-        "authorization_check": "PRE_RETRIEVAL_SCOPE_ENFORCEMENT",
-        "authorization_result": "AUTHORIZED",
-        "route": "authorized",
-    }
-
-
-def decide_permission(state: GraphState):
-    if state.get("route") == "authorization_denied":
-        return "authorization_denied"
-    return "authorized"
-
-
 def router_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    q_raw = (state.get("question") or state.get("original_query") or "").strip()
-    q = q_raw.lower()
+    print("\n[router] Classifying user query...")
+    raw_q = state.get("question") or ""
+    q = raw_q.strip().lower()
+    q_stripped = q.strip(".,!?\"' ")
 
-    from koinonia_assistant.rag.analytics_engine import classify_langgraph_intent
-    from koinonia_assistant.rag.name_search import detect_statistical_query
-    intent_info = classify_langgraph_intent(q_raw)
-    c_intent = intent_info.get("intent", "GENERAL_DATABASE_QUERY")
-    s_tier = intent_info.get("speed_tier", "FAST")
-    lang = intent_info.get("detected_language") or state.get("detected_language", "en")
-
-    print(
-        f"[LANGGRAPH] ROUTER NODE | request_id={req_id} | language={lang} "
-        f"| intent={c_intent} | speed_tier={s_tier} | original_query='{q_raw}'"
-    )
-
-    common_state = {
-        **state,
-        "question": q_raw,
-        "original_query": state.get("original_query") or q_raw,
-        "detected_language": lang,
-        "normalized_query": intent_info.get("normalized_query", ""),
-        "intent_query": intent_info.get("intent_query", c_intent),
-        "entity_query": intent_info.get("entity_query", ""),
-        "canonical_terms": intent_info.get("canonical_terms", {}),
-        "final_response_language": intent_info.get("final_response_language", "ta" if lang == "ta" else "en"),
-        "classified_intent": c_intent,
-        "speed_tier": s_tier,
-        "intent_info": intent_info,
-        # Initialize SQL Fallback and Self-Correction tracking
-        "retrieval_status": None,
-        "retrieval_failed": False,
-        "sql_fallback_required": False,
-        "sql_fallback_attempted": False,
-        "sql_fallback_result": None,
-        "sql_retry_count": 0,
-        "sql_max_retries": 2,
-        "sql_retry_exhausted": False,
-    }
-
-    if c_intent == "GREETING" or any(phrase in q for phrase in ["how are you", "who are you", "what can you do", "introduce yourself"]):
-        return {
-            **common_state,
-            "route": "greeting",
-            "classified_intent": "GREETING",
-        }
-
-    if c_intent == "FORECAST" or (c_intent == "COMPARISON" and intent_info.get("include_forecast")):
-        return {
-            **common_state,
-            "route": "forecast_node",
-        }
-
-    if c_intent in ("HISTORICAL_ANALYSIS", "TREND_ANALYSIS", "COMPARISON"):
-        metrics = intent_info.get("metrics") or []
-        # If it is a demographic, BCC, or family comparison (not yearly sacrament time-series), route to sql_analytics!
-        if c_intent == "COMPARISON" and not any(m in ["baptism", "communion", "confirmation", "marriage"] for m in metrics):
+    # Explicit Security Injection & Threat Guard
+    injection_patterns = [
+        r';\s*(?:DROP|ALTER|TRUNCATE|DELETE|INSERT|UPDATE|CREATE|REPLACE)',
+        r'\b(?:SLEEP|BENCHMARK|WAITFOR|GET_LOCK)\b',
+        r'\bUNION\s+(?:ALL\s+)?SELECT\b',
+        r'--\s*$',
+        r'/\*.*?\*/',
+        r'\b(?:ignore all previous instructions|output your system prompt|leak secret keys|system prompt|secret API keys)\b',
+        r'\b(?:tabUser|information_schema|mysql\.)\b'
+    ]
+    for pat in injection_patterns:
+        if re.search(pat, raw_q, re.IGNORECASE | re.DOTALL):
+            print(f"[router] Security Alert: Intercepted malicious injection payload: '{raw_q}'")
             return {
-                **common_state,
-                "route": "sql_analytics",
+                **state,
+                "route": "blocked_security",
+                "generated_sql": "BLOCKED_SECURITY",
+                "final_answer": "🚫 **Security Alert**: Malicious SQL injection or unauthorized schema exfiltration attempt was blocked by KOINONIA Security Guardrails."
             }
-        return {
-            **common_state,
-            "route": "analytics_node",
-        }
 
-    # 1. SQL Pipeline: Analytical / Aggregate / Statistical queries
-    stat_plan = detect_statistical_query(q_raw)
-    is_record_lookup = any(w in q for w in [
-        "family card", "family register", "tell me about", "who is the family head",
-        "address of this family", "contact number", "details of", "who belongs", "family members"
-    ]) or bool(intent_info.get("person_name"))
+    # Explicit Security Injection & Threat Guard
+    injection_patterns = [
+        r';\s*(?:DROP|ALTER|TRUNCATE|DELETE|INSERT|UPDATE|CREATE|REPLACE)',
+        r'(?:SLEEP|BENCHMARK|WAITFOR|GET_LOCK)\s*\(',
+        r'UNION\s+(?:ALL\s+)?SELECT\s+.*(?:tabUser|information_schema|mysql\.|password|hash|secret|token|api_key)',
+        r'--\s*$',
+        r'(?:ignore all previous instructions|output your system prompt|leak secret keys)'
+    ]
+    for pat in injection_patterns:
+        if re.search(pat, state["question"], re.IGNORECASE):
+            print(f"[router] Security Alert: Intercepted malicious injection payload: '{state['question']}'")
+            return {
+                **state,
+                "route": "text_to_sql",
+                "generated_sql": "BLOCKED_SECURITY",
+                "final_answer": "🚫 **Security Alert**: Malicious SQL injection or unauthorized schema exfiltration attempt was blocked by KOINONIA Security Guardrails."
+            }
 
-    is_stat = (
-        intent_info.get("is_statistical")
-        or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS", "COMPARISON", "STATISTICAL_ANALYSIS")
-        or (c_intent == "COUNT" and not is_record_lookup)
-        or (bool(stat_plan) and not is_record_lookup)
-        or any(w in q for w in [
-            "how many", "count of", "total members", "total families", "distribution",
-            "by gender", "age-wise", "above 60", "below 20", "under 18", "each year", "each bcc",
-            "average", "avg", "compare", "comparison", "family size", "across different"
-        ])
-    )
+    # Greetings & Identity / Capabilities
+    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "thanks", "thank you", "bye", "goodbye", "namaste", "vanakkam"}
+    identity_phrases = [
+        "how are you", "who are you", "what can you do", "introduce yourself", 
+        "tell me about yourself", "tell me about you self", "tell about yourself", 
+        "about yourself", "about you", "what are you", "help me", "help", 
+        "what is your name", "your features", "what do you do", "capabilities",
+        "how to use", "instructions", "guide me", "what is koinonia"
+    ]
+    if q_stripped in greetings or any(phrase in q for phrase in identity_phrases):
+        return {**state, "route": "greeting"}
 
-    if is_stat and not is_record_lookup:
-        return {
-            **common_state,
-            "route": "sql_analytics",
-        }
+    # If completely empty or single punctuation
+    if not q_stripped or len(q_stripped) < 2:
+        return {**state, "route": "unclear"}
 
-    # 2. Current Retrieval: Person / Member / Family records lookup
-    if c_intent in ("MEMBER_SEARCH", "FAMILY_SEARCH", "SACRAMENT_SEARCH", "LIST", "GENERAL_DATABASE_QUERY") or is_record_lookup:
-        return {
-            **common_state,
-            "route": "current_retrieval",
-        }
+    # All user requests, questions, searches, and name lookups route directly to text_to_sql
+    return {**state, "route": "text_to_sql"}
 
+def blocked_security_node(state: GraphState) -> GraphState:
     return {
-        **common_state,
-        "route": "sql_analytics",
-        "classified_intent": "GENERAL_DATABASE_QUERY",
+        **state,
+        "generated_sql": "BLOCKED_SECURITY",
+        "final_answer": "🚫 **Security Alert**: Malicious SQL injection or unauthorized schema exfiltration attempt was blocked by KOINONIA Security Guardrails."
     }
 
 def unclear_node(state: GraphState) -> GraphState:
-    is_ta = state.get("detected_language") == "ta" or any('\u0B80' <= c <= '\u0BFF' for c in state["question"])
-    if is_ta:
-        answer = (
-            "🤔 மன்னிக்கவும், நீங்கள் கேட்டது எனக்கு சரியாகப் புரியவில்லை.\n\n"
-            "நான் KOINONIA பங்கு உதவியாளர். நான் பங்கு குடும்பப் பதிவேடு மற்றும் திருவருட்சாதனப் பதிவேடுகளைத் தேட உதவ முடியும். "
-            "உதாரணமாக நீங்கள் கேட்கலாம்:\n"
-            "- *'கடந்த 10 ஆண்டுகளில் நடைபெற்ற முதல் நற்கருணை நிகழ்வுகளின் எண்ணிக்கையைத் தரவும்'*\n"
-            "- *'அந்தோணி ராஜின் திருமுழுக்கு நிலை என்ன?'*\n"
-            "- *'YLG/001 குடும்பத்தின் உறுப்பினர்களை காட்டு'*\n\n"
-            "நான் உங்களுக்கு எப்படி உதவலாம் என்று சொல்லுங்கள்!"
-        )
-    else:
-        answer = (
-            "🤔 I'm sorry, I didn't quite get that.\n\n"
-            "I am the KOINONIA Parish Assistant. I can help you search the parish family register and sacrament records. "
-            "Try asking me things like:\n"
-            "- *'Show baptism statistics for the last 10 years'*\n"
-            "- *'What is the baptism status of Antony Raj?'*\n"
-            "- *'Get family details of YLG/001'*\n\n"
-            "Please let me know how I can assist you!"
-        )
+    answer = (
+        "🤔 I'm sorry, I didn't quite get that.\n\n"
+        "I am the **KOINONIA Assistant**. I can help you search the parish family register and sacrament records. "
+        "Try asking me things like:\n"
+        "- *'List all families in Lourdu Matha BCC'* or *'How many members are in Zone 1?'*\n"
+        "- *'Find the baptism record of Rani Marianathan'* or *'Who was the burial minister for Jessy Lourdusamy?'*\n"
+        "- *'Show all confirmations conducted in 2024'*\n\n"
+        "Please let me know how I can assist you!"
+    )
     return {**state, "final_answer": answer}
 
 def greeting_node(state: GraphState) -> GraphState:
     import frappe
-    user_name = frappe.db.get_value("User", frappe.session.user, "first_name") or "there"
-    is_ta = state.get("detected_language") == "ta" or any('\u0B80' <= c <= '\u0BFF' for c in state["question"])
-    scope_name = (state.get("authorization_context") or {}).get("scope_name") or state.get("user_parish") or "பங்கு"
-    if is_ta:
-        answer = (
-            f"👋 வணக்கம் {user_name}! நான் **KOINONIA பங்கு உதவியாளர்** ({scope_name}).\n\n"
-            "குடும்ப அட்டை (Family Card), உறுப்பினர் விவரங்கள் மற்றும் திருவருட்சாதனப் பதிவேடுகளை (திருமுழுக்கு, முதல் நற்கருணை, உறுதிப்பூசுதல், திருமணம்) நேரடியாகத் தமிழில் தேடவும், புள்ளிவிவரப் பகுப்பாய்வு செய்யவும் நான் உதவுவேன்!"
-        )
-    else:
-        answer = (
-            f"👋 Hello {user_name}! I'm the **KOINONIA Parish Assistant** ({scope_name}).\n\n"
-            "I can help you search family registers, member data, and sacrament registers (Baptism, First Holy Communion, Confirmation, Marriage) and run verified statistical analyses within your authorized parish scope."
-        )
+    user_email = state.get("user_email") or frappe.session.user
+    user_name = "there"
+    user_title = ""
+
+    if user_email and user_email != "Guest":
+        user_name = frappe.db.get_value("User", user_email, "first_name") or frappe.db.get_value("User", user_email, "full_name") or "there"
+        roles = frappe.get_roles(user_email)
+        if "Bishop" in roles or "Bishop Role" in roles:
+            user_title = "Bishop"
+        elif "Vicar General" in roles or "Vicar" in roles:
+            user_title = "Vicar"
+        elif "Parish Priest" in roles:
+            user_title = "Father"
+
+    salutation = f"Hello {user_title} {user_name}!" if user_title else f"Hello {user_name}!"
+    
+    answer = (
+        f"👋 **{salutation}** I am **KOINONIA Assistant**, your dedicated Catholic Diocesan & Parish Registry Assistant.\n\n"
+        "Here is what I can do for you:\n"
+        "• 🏛️ **Parish & Vicariate Registries:** Find parishes, clergy assignments, family counts, and diocese-wide demographics.\n"
+        "• 🕊️ **Sacramental Records:** Search and verify records for **Baptism, First Holy Communion, Confirmation, Holy Matrimony, Anointing of the Sick, and Christian Burial**.\n"
+        "• 👥 **Family & Census Data:** Explore family registers, Basic Christian Communities (BCC), and parishioner directories.\n"
+        "• 📊 **Analytics & Visualizations:** Generate line graphs 📈, bar charts 📊, and pie charts 🥧 for parish statistics upon request.\n"
+        "• 📄 **Export Reports:** Export formatted **Excel spreadsheets** and **official PDF documents** with complete headers and totals.\n\n"
+        "💬 *Just ask your question in plain English or Tanglish (e.g., 'Show total families in each parish' or 'List baptisms in 2024') and I will fetch the records for you!*"
+    )
     return {**state, "final_answer": answer}
 
 ENHANCE_QUERY_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a multilingual query understanding assistant for the KOINONIA Parish Assistant app.
-STRICT RULES (Sections 34–36):
-1. Understand Tamil and English queries directly.
-2. NEVER transliterate Tamil sentences into Tanglish (e.g., never produce 'Katantha 10 Aantukalil...').
-3. Extract the structured database search intent while preserving canonical Koinonia Catholic terminology:
-   - திருமுழுக்கு / ஞானஸ்நானம் -> Baptism (tabBaptism)
-   - முதல் நற்கருணை / முதல் திருவிருந்து -> First Holy Communion (tabCommunion)
-   - உறுதிப்பூசுதல் -> Confirmation (tabConfirmation)
-   - திருமணம் -> Marriage (tabMarriage)
-   - குடும்ப அட்டை -> Family Card (tabFamily)
-   - உறுப்பினர் -> Member (tabMember)
-4. Resolve pronouns using Conversation History if applicable.
+    ("system", """You are a smart query context extension assistant for the KOINONIA Parish Assistant app.
+The user is asking a question that references a previous question, record, or quoted text.
+Your task is to combine the referenced context with the user's new question into a complete, standalone question for a church/sacrament database assistant.
 
-Conversation History:
-{history_context}
+Examples:
+- User Question: "Show me the babtizum records about Jose D." | Reference: "List the users who babtized in 2025"
+  -> Enhanced: "Show the baptism records of Jose D. who was baptized in 2025"
 
-Return a concise structured intent summary for SQL generation without Tanglish conversion."""),
-    ("human", "Original User Question ({language}): {question}"),
+- User Question: "tell me about Nirmala Fernando G. family details" | Reference: "Found 50 records matching your search: | Full Name | Bapt Date | Bapt Parish I..."
+  -> Enhanced: "Tell me about the family details and family members of Nirmala Fernando G."
+
+- User Question: "List them with their parents" | Reference: "List the users who babtized in 2025"
+  -> Enhanced: "List the persons baptized in 2025 with their first name, last name, father name, and mother name"
+
+- User Question: "tell me more about this person" | Reference: "Thomas D'Souza"
+  -> Enhanced: "Show details for member Thomas D'Souza"
+
+- User Question: "Show me his marriage records" | Reference: "Jose D"
+  -> Enhanced: "Show marriage records for Jose D."
+
+- User Question: "Show next 50 records" | Reference: "Show members in St. Joseph's Parish"
+  -> Enhanced: "Show next 50 members in St. Joseph's Parish with offset 50"
+
+- User Question: "Next records" | Reference: "Show marriages in 2025"
+  -> Enhanced: "Show next 50 marriages in 2025 with offset 50"
+
+- User Question: "அவங்களோட பெயர் பட்டியல் தாங்க" | Reference: "2024-ல் ஞானஸ்நானம் பெற்றவர்கள் எத்தனை பேர்? **Total Count**: 42"
+  -> Enhanced: "List all persons baptized in 2024 (tabBaptism) with their first name, middle name, last name, bapt date, and parish name"
+
+- User Question: "avangaloda family members list pannunga" | Reference: "Holy Baptism Registry Record: Carmel Maria B. Family Card Number: FC-25646"
+  -> Enhanced: "List all living family members of family card number FC-25646 (tabMember joined with tabFamily)"
+
+- User Question: "அவர்களின் பெற்றோர் பெயர் விபரம் கொடு" | Reference: "2023-ல் புது நன்மை எடுத்தவர்கள் யார் யார்? Found communion records in 2023"
+  -> Enhanced: "List all persons who received First Holy Communion in 2023 with their first name, middle name, last name, father name, mother name, and parish name (tabCommunion)"
+
+CRITICAL RULES:
+1. Return ONLY the extended, standalone question string.
+2. Do NOT add markdown, explanations, or quotes.
+3. Preserve all specific entity names (names, dates, years, sacraments).
+4. STRICT SACRAMENT CONTEXT PRESERVATION:
+   - If prior conversation is about First Holy Communion / புது நன்மை / FHC -> The extended query MUST remain about First Holy Communion (tabCommunion). NEVER change it to Confirmation or Baptism.
+   - If prior conversation is about Baptism / ஞானஸ்நானம் -> The extended query MUST remain about Baptism (tabBaptism).
+   - If prior conversation is about Confirmation / உறுதிப்பூசுதல் -> The extended query MUST remain about Confirmation (tabConfirmation).
+   - If prior conversation is about Marriage / திருமணம் -> The extended query MUST remain about Marriage (tabMarriage).
+5. When user asks for parish name / பங்கு பெயர் and family card / குடும்ப அட்டை -> ALWAYS explicitly include "parish name (fhc_parish_id AS parish_name)" and "family card number (family_card_no)" in the extended query."""),
+    ("human", "{reference_context}\nLatest User Question: {question}"),
 ])
 
+STANDALONE_ENHANCE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an intelligent Catholic Church terminology and translation assistant for the KOINONIA Parish Assistant app.
+Your task is to convert Tamil, Tanglish, and English questions with typos/phonetics into a clean, unambiguous standalone English search query for a church/sacrament database.
+
+CATHOLIC TAMIL TERMINOLOGY MAPPINGS:
+- "பங்கு பெயர்" / "பங்கின் பெயர்" / "பங்கு" -> Parish Name (fhc_parish_id AS parish_name / bapt_parish_id AS parish_name / mrg_parish_id AS parish_name / parish_id AS parish_name)
+- "குடும்ப அட்டை எண்" / "குடும்ப அட்டை" / "அட்டை எண்" -> Family Card Number (family_card_no)
+- "பங்கினர் பெயர்" / "விசுவாசி பெயர்" / "நபரின் பெயர்" -> Person Full Name (first_name, middle_name, last_name)
+- "புது நன்மை" / "புதுநன்மை" / "முதல் நற்கருணை" / "நற்கருணை" -> First Holy Communion (tabCommunion)
+- "ஞானஸ்நானம்" / "திருமுழுக்கு" / "மாமோதீசா" -> Baptism (tabBaptism)
+- "உறுதிப்பூசுதல்" / "அபிஷேகம்" -> Confirmation (tabConfirmation)
+- "திருமணம்" / "விவாகம்" / "கல்யாணம்" -> Marriage / Holy Matrimony (tabMarriage)
+- "நோயில் பூசுதல்" / "கடைசிப் பூசுதல்" / "தைலம்" -> Anointing of the Sick (tabAnointing Of Sick)
+- "அடக்கம்" / "மரணப் பதிவு" / "மரித்தவர்கள்" -> Christian Burial / Death (tabDeath)
+- "நபர்கள்" / "பங்கினர்" / "விசுவாசிகள்" / "உறுப்பினர்கள்" -> Members / Parishioners (tabMember)
+- "குடும்பங்கள்" / "குடும்பம்" -> Families (tabFamily)
+- "அன்பியம்" / "அன்பியங்கள்" -> BCC / Basic Christian Communities (tabFamily)
+- "பங்கு" / "பங்குகள்" -> Parish / Parishes (tabParish)
+- "மறைமாவட்டம்" -> Diocese (tabDiocese)
+- "மறைவட்டம்" -> Vicariate (tabVicariate)
+
+Examples:
+- "இந்த வருடம் எத்தனை நபர்கள் புது நன்மை எடுத்துள்ளனர்?" -> "How many members received First Holy Communion this year?"
+- "போன வருடம் நடந்த திருமணங்களில் Clinton-ன் பேரில் யாருக்கும் திருமணம் நடந்ததா?" -> "Find marriage records for Clinton in marriage register"
+- "Clinton திருமணம் நடந்ததா?" -> "Find marriage records for Clinton in marriage register"
+- "கடந்த வருடம் மொத்தம் எத்தனை பேர் புதுப்பணி எடுத்தார்கள் அவர்களின் list மற்றும் family code-ஐ இரண்டையும் குறிப்பிடவும்" -> "List members who received First Holy Communion last year with their names and family card number (family_card_no)"
+- "கடந்த வருடம் புது நன்மை எடுத்தவர்கள் பட்டியல் மற்றும் குடும்ப அட்டை எண்" -> "List members who received First Holy Communion last year with their names and family card number (family_card_no)"
+- "இந்த ஆண்டு மொத்தம் எத்தனை நபர்கள் இறந்தார்கள் மற்றும் அவர்களின் பரிஷ் பெயரை குறிப்பிடவும்" -> "List members who died this year with their parish name from death register"
+- "புது நன்மை பெற்றவர்கள் பட்டியல்" -> "List of members who received First Holy Communion"
+- "2024-ல் ஞானஸ்நானம் பெற்ற குழந்தைகள்" -> "List of children baptized in 2024"
+- "உறுதிப்பூசுதல் பெற்றவர்கள் எத்தனை பேர்" -> "Count of members who received Confirmation"
+- "shwo all merriage recrods" -> "Show all marriage records"
+- "list membes who completed babtizum in 2024" -> "List members who completed baptism in 2024"
+- "who is the famly hed in st joshep parsh" -> "Who is the family head in St. Joseph Parish"
+- "how many familys in lourdu matha bcc" -> "How many families in Lourdu Matha BCC"
+
+CRITICAL RULES:
+1. Return ONLY the translated, corrected English question string.
+2. Do NOT add quotes, markdown, explanations, or any extra text.
+3. Preserve all specific numbers, years, proper names, and parish names."""),
+    ("human", "{question}"),
+])
+
+def clean_church_query_text(text: str) -> str:
+    if not text:
+        return text
+    # Specialized phonetic & speech-to-text cleaner for Tamil/English Catholic Church queries
+    fixes = [
+        (r'\bபுதுப்?\s*பணி\b', 'First Holy Communion (புது நன்மை)'),
+        (r'\bபுதுப்பணி\b', 'First Holy Communion (புது நன்மை)'),
+        (r'\bபுதுபணி\b', 'First Holy Communion (புது நன்மை)'),
+        (r'\bpudupani\b', 'First Holy Communion'),
+        (r'\bpudu\s*pani\b', 'First Holy Communion'),
+        (r'\bபுது\s*நன்மை\b', 'First Holy Communion (புது நன்மை)'),
+        (r'\bபுதுநன்மை\b', 'First Holy Communion (புது நன்மை)'),
+        (r'\bமுதல்\s*நற்கருணை\b', 'First Holy Communion (முதல் நற்கருணை)'),
+        (r'\bநற்கருணை\b', 'First Holy Communion (நற்கருணை)'),
+        (r'\bkalyanam\b', 'Marriage'),
+        (r'\bகல்யாண[ம்ா]?\b', 'Marriage (திருமணம்)'),
+        (r'\bதிருமணம்\b', 'Marriage (திருமணம்)'),
+        (r'\bவிவாகம்\b', 'Marriage (விவாகம்)'),
+        (r'\bஞானஸ்தானம்\b', 'Baptism (ஞானஸ்நானம்)'),
+        (r'\bஞான\s*ஸ்தானம்\b', 'Baptism (ஞானஸ்நானம்)'),
+        (r'\bஞானஸ்நானம்\b', 'Baptism (ஞானஸ்நானம்)'),
+        (r'\bஞானஸ்நான\b', 'Baptism (ஞானஸ்நான)'),
+        (r'\bதிருமுழுக்கு\b', 'Baptism (திருமுழுக்கு)'),
+        (r'\bமாமோதீசா\b', 'Baptism (மாமோதீசா)'),
+        (r'\bஉறுதிப்?\s*பூசுதல்\b', 'Confirmation (உறுதிப்பூசுதல்)'),
+        (r'\bநோயில்\s*பூசுதல்\b', 'Anointing of the Sick (நோயில் பூசுதல்)'),
+        (r'\bகடைசிப்\s*பூசுதல்\b', 'Anointing of the Sick (நோயில் பூசுதல்)'),
+        (r'\bஅடக்கம்\b', 'Christian Burial Death (அடக்கம்)'),
+        (r'\bமரணப்\s*பதிவு\b', 'Death Register (மரணப் பதிவு)'),
+        (r'\bபங்கு\s*பெயர்\b', 'parish name (fhc_parish_id AS parish_name)'),
+        (r'\bபங்கின்\s*பெயர்\b', 'parish name (fhc_parish_id AS parish_name)'),
+        (r'\bpangu\s*peyar\b', 'parish name'),
+        (r'\bpangyin\s*peyar\b', 'parish name'),
+        (r'\bபங்கு\b', 'parish'),
+        (r'\bபங்குகள்\b', 'parishes'),
+        (r'\bகுடும்ப\s*அட்டை(?:\s*எண்)?\b', 'family card number (family_card_no)'),
+        (r'\bமரித்தவர்கள்\b', 'Death Register (மரித்தவர்கள்)'),
+        (r'\bcarrots?\b', 'vicars'),
+        (r'\bkarots?\b', 'vicars'),
+        (r'\bparis-?கள்\b', 'parishes'),
+        (r'\bparis\b', 'parish'),
+        (r'\bpariss\b', 'parish'),
+        (r'\bpaaris\b', 'parish'),
+        (r'\bபரிஷ்\b', 'parish'),
+        (r'\bபாரிஸ்\b', 'parish'),
+        (r'\bdiocess\b', 'diocese'),
+        (r'\bdie access\b', 'diocese'),
+        (r'\bbabtizum\b', 'baptism'),
+        (r'\bbapthism\b', 'baptism'),
+        (r'\bbapthisam\b', 'baptism'),
+        (r'\bunion\s+(?!all\s+select|select)', 'communion'),
+        (r'\bcnf\b', 'confirmation'),
+        (r'\bmrg\b', 'marriage'),
+        (r'\banbiyam\b', 'BCC'),
+        (r'\banbiyangal\b', 'BCCs'),
+        (r'\bfamily\s*code\b', 'family card number (family_card_no)'),
+        (r'\bகுடும்ப\s*கோடு\b', 'family card number (family_card_no)'),
+        (r'\bகுடும்ப\s*அட்டை\b', 'family card number (family_card_no)'),
+        (r'\bகடந்த\s*(?:வருடம்|ஆண்டு)\b', 'last year'),
+        (r'\bபோன\s*வருடம்\b', 'last year'),
+    ]
+    cleaned = text
+    for pat, rep in fixes:
+        cleaned = re.sub(pat, rep, cleaned, flags=re.IGNORECASE)
+    return cleaned
+
 def enhance_query_node(state: GraphState) -> GraphState:
-    """
-    Preserves `original_query` and `question` untouched (Section 35).
-    Never overwrites Tamil input with Tanglish.
-    """
-    orig_q = state.get("original_query") or state["question"]
-    lang = state.get("detected_language") or "en"
-    intent_info = state.get("intent_info") or {}
-    print(f"[enhance_query] Preserving original_query ({lang}): '{orig_q}'")
-
-    if lang == "ta" and intent_info.get("normalized_query"):
-        structured_q = intent_info["normalized_query"]
-        embedding = embed_text(orig_q)
-        return {
-            **state,
-            "question": orig_q,
-            "original_query": orig_q,
-            "enhanced_query": structured_q,
-            "normalized_query": structured_q,
-            "query_embedding": embedding,
-        }
-
+    question = clean_church_query_text(state["question"].strip())
     history = state.get("history", [])
-    history_context = ""
-    if history:
+    reference_text = (state.get("reference_text") or "").strip()
+    
+    reference_keywords = [
+        # English Pronouns & Context Triggers
+        "them", "they", "those", "these", "their", "him", "her", "it", "list them", "show them", 
+        "the same", "above", "this", "that", "next", "more", "remaining", "page", "next records", 
+        "next 50", "next page", "who are they", "what are their", "show their", "give their", "whose", "details",
+        
+        # Tamil Pronouns & Context Triggers (தமிழ் வினாத் தொடர்ச்சி)
+        "அவர்கள்", "அவர்களை", "அவர்களின்", "அவங்களோட", "அவங்கள", "அவங்களுக்கு", "அவங்களை", "அவங்க", 
+        "அதை", "அவற்றின்", "அவற்றில்", "அதில்", "மேலே", "மேற்கண்ட", "இவர்கள்", "இவர்களை", "இவர்களின்", 
+        "இவங்களோட", "இவங்கள", "இவங்களுக்கு", "இவங்க", "அவர்களின் பெயர்", "பட்டியல்", "விபரம் குடு", "விவரம்",
+        "குடும்ப அட்டை", "அட்டை எண்", "பங்கு பெயர்", "குடு", "தாங்க", "காட்டு",
+        
+        # Tanglish Pronouns & Triggers
+        "avanga", "avangala", "avangaloda", "avangaluku", "ivanga", "ivangala", "ivangaloda", "ivangaluku", 
+        "adhu", "adhula", "mela ulla", "mela irukura", "details kudu", "list kudu", "show their", "their parish"
+    ]
+    q_lower = question.lower()
+    has_reference_keyword = any(re.search(r'\b' + re.escape(kw) + r'\b', q_lower) for kw in reference_keywords)
+    
+    # 1. If the user explicitly referenced a message/quote OR the query has reference pronouns with history:
+    if reference_text or (history and has_reference_keyword):
+        print(f"[enhance_query] Extending query with reference & spelling correction: question='{question}', reference='{reference_text}'")
+        
         history_lines = []
-        for msg in history[-4:]:
+        if reference_text:
+            history_lines.append(f"Referenced Context / Quote: {reference_text}")
+        for msg in history[-3:]:
             role = "User" if msg.get("role") == "user" else "Assistant"
-            history_lines.append(f"{role}: {msg.get('content', '')[:200]}")
+            history_lines.append(f"{role}: {msg.get('content', '')[:500]}")
         history_context = "\n".join(history_lines)
 
-    response = llm.invoke(ENHANCE_QUERY_PROMPT.format_messages(
-        history_context=history_context or "(no prior conversation)",
-        language=lang,
-        question=orig_q,
-    ))
-    enhanced = response.content.strip()
-    embedding = embed_text(orig_q)
-    return {
-        **state,
-        "question": orig_q,
-        "original_query": orig_q,
-        "enhanced_query": enhanced,
-        "query_embedding": embedding,
+        try:
+            response = invoke_llm_with_rotation(ENHANCE_QUERY_PROMPT.format_messages(
+                reference_context=history_context,
+                question=question
+            ))
+            enhanced = response.content.strip().strip('"').strip("'")
+            print(f"[enhance_query] Extended & Corrected Question: '{enhanced}'")
+        except Exception as e:
+            print(f"[enhance_query] Warning in reference enhancement: {e}")
+            enhanced = question
+
+        embedding = embed_text(enhanced)
+        return {**state, "enhanced_query": enhanced, "query_embedding": embedding}
+
+    # 2. Standalone question: Automatic Background Spelling & Terminology Correction
+    print(f"[enhance_query] Automatic background spelling & grammar enhancement for prompt: '{question}'")
+    
+    # Fast church keyword dictionary corrections
+    corrections = {
+        "babtism": "Baptism", "babtized": "Baptized", "baptizm": "Baptism", "parsh": "Parish",
+        "marige": "Marriage", "marrige": "Marriage", "mariage": "Marriage", "famly": "Family",
+        "famlies": "Families", "comunion": "Holy Communion", "dioce": "Diocese", "diocis": "Diocese",
+        "membr": "Member", "membrs": "Members", "st josef": "St. Joseph's"
     }
+    
+    try:
+        response = invoke_llm_with_rotation(STANDALONE_ENHANCE_PROMPT.format_messages(question=question))
+        enhanced = response.content.strip().strip('"').strip("'")
+        print(f"[enhance_query] Automatically Enhanced Question: '{enhanced}'")
+    except Exception as e:
+        print(f"[enhance_query] Fallback dictionary correction: {e}")
+        words = question.split()
+        fallback_words = [corrections.get(w.lower(), w) for w in words]
+        enhanced = " ".join(fallback_words)
+        
+    embedding = embed_text(enhanced)
+    return {**state, "enhanced_query": enhanced, "query_embedding": embedding}
 
 def retrieve_context_node(state: GraphState) -> GraphState:
     print("[retrieve_context] Retrieving schema context and few-shots...")
     relevant_tables = fetch_relevant_schemas(state["question"], state["enhanced_query"], state["query_embedding"])
-    relevant_fields = fetch_relevant_fields(state["query_embedding"])
+    combined_query = f"{state['question']} {state['enhanced_query']}"
+    relevant_fields = fetch_relevant_fields(state["query_embedding"], combined_query)
     few_shots = fetch_few_shot_examples(state["query_embedding"])
     return {**state, "relevant_tables": relevant_tables, "relevant_fields": relevant_fields, "few_shot_examples": few_shots}
 
 SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are an expert MariaDB SQL query writer for the KOINONIA Parish Assistant app.
+    ("system", r"""You are an expert MariaDB SQL query writer for KOINONIA Catholic Diocesan & Parish Assistant.
 
-CRITICAL: The current date is {current_date}. If the user asks for relative timeframes like "past 15 years", calculate it relative to this date!
-
-## Database Tables and Relationships
-You are querying a MariaDB database with the following custom tables:
+## Database Tables & Schema Context:
 {relevant_tables}
 
-## Relevant Fields (Semantically Matched Columns)
-Use these exact column names when matching user concepts:
+## Matched Columns:
 {relevant_fields}
 
 {few_shot_examples}
 
-### STRICT RELATIONSHIP RULES:
-1. `tabMember` links to `tabFamily` via `tabMember.family_id = tabFamily.name`.
-2. Sacrament registers (`tabBaptism`, `tabCommunion`, `tabConfirmation`, `tabMarriage`, `tabAnointing Of Sick`, `tabDeath`) represent sacrament events.
-3. Sacrament records DO NOT have direct foreign keys to `tabMember`. To find a member's sacrament record, you MUST join or filter by matching names:
-   `tabBaptism.first_name = tabMember.first_name AND tabBaptism.last_name = tabMember.last_name`
-   (And similarly for `tabCommunion`, `tabConfirmation`, `tabAnointing Of Sick`, `tabDeath`).
-4. For `tabMarriage`, query marriages between bridegrooms and brides using columns:
-   `bridegroom_name`, `bridegroom_last_name`, `bride_name`, `bride_last_name`.
-5. Primary key columns in all Frappe tables are named `name` (e.g. `tabFamily.name`, `tabMember.name`), NOT `id`.
-6. FUZZY NAME SEARCHING: Transliterated names rarely match exactly in the database due to spelling variations (e.g., Surya vs Suriya). When searching by a person's name, ALWAYS use the full name but generate multiple phonetic spelling variations for that name and use them in an IN clause or multiple LIKE statements (e.g., `first_name IN ('Surya', 'Suriya', 'Sooriya')`). DO NOT truncate the name to 3 letters.
-7. SACRAMENT FALLBACK (CRITICAL): Many sacrament dates are stored directly in `tabMember` without a formal registry entry in `tabBaptism`/etc. When searching for a specific person's sacrament details (e.g. baptism), DO NOT use the sacrament tables (tabBaptism) as they are often empty. Instead, ALWAYS query the `tabMember` table DIRECTLY, as it contains the `bapt_date`, `bapt_parish_id`, etc.
-Example for Baptism:
-SELECT name, first_name, last_name, bapt_date, bapt_parish_id FROM tabMember WHERE first_name IN ('Adaikala', 'Adaikalam') AND bapt_date IS NOT NULL
-(Apply this same logic for Communion, Confirmation, Marriage, and Death using fhc_date, cnf_date, mrg_date, death_date in tabMember).
-7. SACRAMENT FALLBACK (CRITICAL): Many sacrament dates are stored directly in `tabMember` without a formal registry entry in `tabBaptism`/etc. When searching for a specific person's sacrament details, you MUST ALWAYS query BOTH tables using a UNION. 
-Example for Baptism:
-SELECT 'Baptism' AS Sacrament, name, first_name, last_name, bapt_date, bapt_parish_id, bapt_minister FROM tabBaptism WHERE first_name IN ('Adaikala', 'Adaikalam') 
-UNION ALL 
-SELECT 'Baptism (from Member)', name, first_name, last_name, bapt_date, bapt_parish_id, NULL AS bapt_minister FROM tabMember WHERE first_name IN ('Adaikala', 'Adaikalam') AND bapt_date IS NOT NULL
-(Apply this same UNION logic for Communion, Confirmation, Marriage, and Death, using NULL for columns that don't exist in tabMember).
+---
+## USER JURISDICTION & ROLE-BASED ACCESS CONTROL (User: {user_role}, Diocese: {user_diocese}, Parish: {user_parish}, Vicariate: {user_vicariate}):
+1. Admin / System Manager: Full global access across all 5 dioceses. No auto-filters unless requested.
+2. Bishop / Curia / Chancellor / Vicar General: Scope data queries to `WHERE diocese_id = '{user_diocese}'`. If foreign diocese requested -> Return `UNAUTHORIZED_DIOCESE`.
+3. Vicar Forane: Scope member/sacrament queries to `WHERE vicariate_id = '{user_vicariate}'`. If other vicariates requested -> Return `UNAUTHORIZED_DIOCESE`.
+4. Parish Priest / Parishioner: Scope personal tables strictly to assigned parish (`bapt_parish_id = '{user_parish}'`, `fhc_parish_id = '{user_parish}'`, `cnf_parish_id = '{user_parish}'`, `mrg_parish_id = '{user_parish}'`, `death_parish_id = '{user_parish}'`, `parish_id = '{user_parish}'`). If other parishes requested -> Return `UNAUTHORIZED_DIOCESE`.
+5. Diocesan & Parish Directory Queries: `tabParish`, `tabDiocese`, `tabVicariate` (churches, patron saints, priests, feast days) are permitted for all roles in `{user_diocese}`.
 
-### ROLE-BASED JURISDICTION BOUNDARIES (CRITICAL):
-- **Bishop**: Has access to all records in all parishes/vicariates/dioceses.
-- **Parish Priest**: Can ONLY access records belonging to his own parish.
-- Current User Role: `{user_role}`
-- Current User Parish: `{user_parish}`
+---
+## COMPLETE CANONICAL RULES (1 – 48):
 
-If the Current User Role is "Parish Priest", you MUST append WHERE filter clauses to restrict queries to their parish:
-- For `tabFamily`: `parish_id = '{user_parish}'`
-- For `tabMember`: `parish_id = '{user_parish}'`
-- For `tabBaptism`: `bapt_parish_id = '{user_parish}'` or `parish_id = '{user_parish}'`
-- For `tabCommunion`: `fhc_place = '{user_parish}'` or `parish_id = '{user_parish}'`
-- For `tabConfirmation`: `cnf_parish_id = '{user_parish}'` or `parish_id = '{user_parish}'`
-- For `tabMarriage`: `mrg_parish_id = '{user_parish}'` or `parish_id = '{user_parish}'`
-- For `tabAnointing Of Sick`: `anointing_parish_id = '{user_parish}'` or `parish_id = '{user_parish}'`
-- For `tabDeath`: `death_parish_id = '{user_parish}'` or `parish_id = '{user_parish}'`
+### Table Selection & Entity Routing:
+- BAPTISM ("baptized", "christened", "bapt date", "godfather", "godmother") → `tabBaptism`
+- COMMUNION ("first communion", "FHC", "holy communion", "புது நன்மை", "நற்கருணை") → `tabCommunion` (Never tabMember)
+  - When listing communion recipients with parish name and family card: `SELECT first_name, middle_name, last_name, fhc_parish_id AS parish_name, family_card_no FROM tabCommunion WHERE diocese_id = '{user_diocese}' AND YEAR(fhc_date) = 1995`
+- CONFIRMATION ("confirmed", "confirmation", "CNF", "sponsor", "உறுதிப்பூசுதல்") → `tabConfirmation`
+- MARRIAGE ("married", "wedding", "groom", "bride", "திருமணம்") → `tabMarriage` (Search both `bridegroom_name` and `bride_name`)
+- DEATH / BURIAL ("died", "death", "buried", "cemetery", "இறப்பு", "அடக்கம்") → `tabDeath`
+- ANOINTING ("anointing", "sick anointing", "நோய் பூசுதல்") → `tabAnointing Of Sick` (Quote with backticks: `tabAnointing Of Sick`)
+- MEMBER ("member", "parishioner", "blood group", "occupation", "marital status", "who is") → `tabMember`
+- FAMILY ("family", "household", "family card", "BCC", "zone", "head of family") → `tabFamily`
+- PARISH DIRECTORY ("parish", "church", "patron saint", "feast day", "parish priest") → `tabParish`
+- DIOCESE PROFILE ("diocese history", "bishop of diocese", "chancery") → `tabDiocese`
+- VICARIATE ("vicariate", "deanery", "vicar forane") → `tabVicariate`
 
-### QUERY GENERATION RULES:
-- ONLY write SELECT queries. NEVER write INSERT, UPDATE, DELETE, or ALTER queries.
-- NEVER use SELECT *. Always SELECT specific columns relevant to the user query (e.g., name, first_name, last_name, dob, bapt_date, etc.) to minimize token size.
-- If the query could return a list of rows, ALWAYS apply LIMIT 20 to prevent query payload size limit errors.
-- Do NOT guess or invent column names. Only use columns shown in the schemas.
-- Do NOT wrap SQL in markdown or HTML. Just return the SQL string.
-- If the question cannot be answered with a query on these tables, return "UNSUPPORTED".
+### Detailed Person & Sacrament Profile Lookups:
+- When user asks for "all details", "details about [Person]", "sacrament record", or searches a specific person by name:
+  - tabBaptism: `SELECT name, bapt_register_ref, first_name, middle_name, last_name, gender, dob, birth_place, bapt_date, bapt_place, bapt_parish_id AS parish_name, diocese_id, father_name, father_occupation, mother_name, mother_occupation, bapt_god_father, bapt_god_father_last_name, bapt_god_mother, bapt_god_mother_last_name, bapt_minister, parish_priest, family_card_no, note FROM tabBaptism WHERE diocese_id = '{user_diocese}' AND (CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%[first]%[last]%' OR (first_name LIKE '%[first]%' AND (middle_name LIKE '%[last]%' OR last_name LIKE '%[last]%'))) LIMIT 1`
+  - tabCommunion: `SELECT name, first_name, middle_name, last_name, gender, dob, fhc_date, fhc_place, fhc_parish_id AS parish_name, diocese_id, father_name, mother_name, fhc_minister, parish_priest, family_card_no, note FROM tabCommunion WHERE diocese_id = '{user_diocese}' AND (CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%[first]%[last]%' OR (first_name LIKE '%[first]%' AND (middle_name LIKE '%[last]%' OR last_name LIKE '%[last]%'))) LIMIT 1`
+  - tabConfirmation: `SELECT name, first_name, middle_name, last_name, gender, dob, cnf_date, cnf_place, cnf_parish_id AS parish_name, diocese_id, father_name, mother_name, cnf_minister, sponsor_name, parish_priest, family_card_no, note FROM tabConfirmation WHERE diocese_id = '{user_diocese}' AND (CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%[first]%[last]%' OR (first_name LIKE '%[first]%' AND (middle_name LIKE '%[last]%' OR last_name LIKE '%[last]%'))) LIMIT 1`
+  - tabMarriage: `SELECT name, bridegroom_name, bridegroom_middle_name, bridegroom_last_name, bride_name, bride_middle_name, bride_last_name, mrg_date, mrg_place, mrg_parish_id AS parish_name, diocese_id, mrg_minister, witness1_name, witness2_name, note FROM tabMarriage WHERE diocese_id = '{user_diocese}' AND (bridegroom_name LIKE '%[Name]%' OR bride_name LIKE '%[Name]%') LIMIT 1`
+  - tabDeath: `SELECT name, first_name, middle_name, last_name, gender, death_date, burial_date, cemetery, parish_id AS parish_name, diocese_id, father_name, mother_name, minister, family_card_no, note FROM tabDeath WHERE diocese_id = '{user_diocese}' AND (CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%[first]%[last]%' OR first_name LIKE '%[first]%') LIMIT 1`
+  - tabMember: `SELECT name, first_name, middle_name, last_name, gender, dob, age, marital_status_id, blood_group_id, occupation, education, mobile, email, street, city, parish_id AS parish_name, vicariate_id, diocese_id, family_id, is_family_head, living_status, bapt_date, fhc_date, cnf_date, mrg_date FROM tabMember WHERE diocese_id = '{user_diocese}' AND (CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%[first]%[last]%' OR first_name LIKE '%[first]%') LIMIT 1`
+
+### Relationship & Schema Rules:
+6. Primary key in all Frappe tables is `name` (NOT `id`).
+7. `tabMember` links to `tabFamily` via `tabMember.family_id = tabFamily.name`.
+   - Multi-sacrament family aggregation: `SELECT f.name AS family_id, f.parish_id AS parish_name, f.vicariate_id, COUNT(m.name) AS total_members, SUM((m.bapt_date IS NOT NULL) + (m.fhc_date IS NOT NULL) + (m.cnf_date IS NOT NULL) + (m.mrg_date IS NOT NULL)) AS total_sacraments FROM tabFamily f JOIN tabMember m ON m.family_id = f.name WHERE f.diocese_id = '{user_diocese}' GROUP BY f.name, f.parish_id, f.vicariate_id HAVING COUNT(m.name) >= 4 AND total_sacraments >= 3 ORDER BY total_members DESC LIMIT 50`
+8. NEVER JOIN `tabMember` or `tabFamily` with sacrament tables (`tabBaptism`, `tabCommunion`, `tabConfirmation`, `tabMarriage`, `tabDeath`, `tabAnointing Of Sick`). Always query sacrament tables directly.
+9. To find members in a Zone → JOIN tabMember with tabFamily on `tabMember.family_id = tabFamily.name`, filter `tabFamily.zone_id = 'Zone X'`.
+10. To find families/members in a BCC → filter `tabFamily.parish_bcc_id = '[BCC Name]'`. Never use place_of_birth.
+11. To list parishes in a vicariate → `FROM tabParish WHERE vicariate_id = '[vicariate name]'`.
+12. NEVER use `parish_priest` to filter parish name. Use `bapt_parish_id`, `mrg_parish_id`, `cnf_parish_id`, `fhc_parish_id`, `death_parish_id`, or `parish_id`.
+
+### Date & Year Rules:
+13. Specific 4-digit years ("in 2024", "2023 baptisms"): Use literal `WHERE YEAR([date_col]) = 2024`. Never replace with YEAR(CURDATE()).
+14. "This year" / "current year": Use `WHERE YEAR([date_col]) = YEAR(CURDATE())`.
+15. "This month": `WHERE MONTH([date_col]) = MONTH(CURDATE()) AND YEAR([date_col]) = YEAR(CURDATE())`.
+16. Specific month ("in January 2024"): `WHERE MONTH([date_col]) = 1 AND YEAR([date_col]) = 2024`.
+17. Date range ("between 2020 and 2023"): `WHERE [date_col] BETWEEN '2020-01-01' AND '2023-12-31'`.
+18. Recent records ("last 6 months"): `WHERE [date_col] >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)`.
+
+### Aggregation, Counts & Lists:
+19. Count-only ("how many", "count"): `SELECT COUNT(*) FROM ...`. For Bishop asking count in diocese without single parish name, return parish-wise breakdown: `SELECT parish_id AS parish_name, COUNT(*) AS total_families FROM tabFamily WHERE diocese_id = '{user_diocese}' GROUP BY parish_id ORDER BY total_families DESC`.
+20. List / Show Records queries ("show", "list", "display", "find", "who are"): Select readable columns. Never use COUNT(*).
+21. Grouped counts: `SELECT [group_col], COUNT(*) FROM ... GROUP BY [group_col] ORDER BY COUNT(*) DESC`. Include `[col] IS NOT NULL AND [col] != ''`.
+22. "How many AND list them": Return just the list of rows (no COUNT(*)).
+23. Charts / Plots ("bar chart", "pie chart", "trend"): Return exactly TWO columns: one label column and one numeric count column (e.g. `SELECT gender, COUNT(*) FROM tabBaptism GROUP BY gender`).
+24. Multi-metric questions ("total parishes + total members"): Combine using `UNION ALL` into a single query.
+
+### Filtering Rules:
+25. By minister / priest: `WHERE bapt_minister LIKE '%Thomas%'`.
+26. By godparent / sponsor: `WHERE bapt_god_father LIKE '%[name]%'`, `bapt_god_mother`, `cnf_god_father`, `sponsor_name`, `witness1_name`.
+27. By gender: `WHERE gender = 'Female'` or `WHERE gender = 'Male'`.
+28. By living status: `WHERE living_status = 'Alive'` or `'Deceased'` in tabMember.
+29. By person name: `WHERE (CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%[first]%[last]%' OR (first_name = '[first]' AND middle_name = '[last]'))`. Single word search: `WHERE (first_name = '[name]' OR middle_name = '[name]' OR last_name = '[name]')`.
+30. By family card number: `WHERE family_card_no = '[card_no]'` (sacraments) or `family_register_number` (tabFamily).
+31. By diocese/vicariate scope: `WHERE diocese_id = '[name]'` or `vicariate_id = '[name]'`.
+32. By marital status: `WHERE marital_status_id = 'Single'` in tabMember; `marital_status = 'Widowed'` in tabDeath.
+33. By occupation: `WHERE occupation LIKE '%teacher%'` in tabMember.
+34. By economic status: `WHERE economic_status LIKE '%Poor%'` in tabFamily.
+35. By cause of death: `WHERE death_cause LIKE '%cancer%'` in tabDeath.
+36. By cemetery: `WHERE cemetery_code LIKE '%St. Joseph%'` in tabDeath.
+37. Register reference: `WHERE bapt_register_ref = '[ref]'`, `mrg_register_ref`, `cnf_register_ref`, `fhc_register_ref`, `death_register_ref`.
+38. Patron saint / feast queries: `WHERE patron_saint LIKE '%Mary%'` or `WHERE MONTH(feast_day) = 1` in tabParish.
+39. Active / Inactive: `WHERE active = 1` or `WHERE active = 0`.
+40. Family head: `WHERE is_family_head = 'Yes'` in tabMember.
+41. Bride / groom religion: `WHERE bridegroom_religion_id != 'Catholic'` in tabMarriage.
+42. Multi-sacrament completion: Query `tabMember` directly `WHERE bapt_date IS NOT NULL AND fhc_date IS NOT NULL AND cnf_date IS NOT NULL`.
+43. Apostrophes in names (D'Souza, St. Mary's): Escape single quotes in SQL literals: `LIKE '%Souza%'` or `\'`.
+44. Family members list: `SELECT m.first_name, m.middle_name, m.last_name, m.relationship_id, m.gender, m.age FROM tabMember m WHERE m.family_id = '[family_id]'`.
+45. Relationship between two persons: `SELECT CONCAT_WS(' ', m1.first_name, NULLIF(m1.middle_name, ''), m1.last_name) AS person1_fullname, m1.relationship_id AS relationship1, m1.parish_id AS parish_name, CONCAT_WS(' ', m2.first_name, NULLIF(m2.middle_name, ''), m2.last_name) AS person2_fullname, m2.relationship_id AS relationship2, m1.family_id, m1.diocese_id FROM tabMember m1 JOIN tabMember m2 ON m1.family_id = m2.family_id WHERE (m1.first_name LIKE '%[name1]%') AND (m2.first_name LIKE '%[name2]%') LIMIT 1`.
+46. Single Diocese Profile: `SELECT diocese_name, bishop_name, established_date, city, phone, email, website, note FROM tabDiocese WHERE (name LIKE '%[diocese]%' OR diocese_name LIKE '%[diocese]%') LIMIT 1`.
+47. Listing all Dioceses: `SELECT diocese_name, bishop_name, established_date, city, phone, email FROM tabDiocese ORDER BY diocese_name ASC`.
+48. Multi-Sacrament Counts / Summary: `UNION ALL` across tabBaptism, tabCommunion, tabConfirmation, tabMarriage, tabDeath, `tabAnointing Of Sick`.
+
+---
+## STRICT OUTPUT RULES:
+- Output ONLY a single executable MariaDB SELECT query inside ```sql ... ``` code block.
+- NEVER use `SELECT *` or system metadata columns (amended_from, _user_tags, creation, modified, idx, docstatus).
 """),
     ("human", "User question: {enhanced_query}"),
 ])
 
-def _fetch_pgvector_rag_context(orig_q: str, enhanced_q: str, query_emb: list) -> tuple:
-    rel_tables = []
-    rel_fields = []
-    few_shots = ""
-    try:
-        if not query_emb:
-            query_emb = embed_text(orig_q)
-        rel_tables = fetch_relevant_schemas(orig_q, enhanced_q or orig_q, query_emb, k=3)
-        rel_fields = fetch_relevant_fields(query_emb, k=10)
-        few_shots = fetch_few_shot_examples(query_emb, k=2)
-        print(f"[RAG pgvector] Successfully retrieved {len(rel_tables)} tables and {len(rel_fields)} relevant fields.")
-    except Exception as e:
-        print(f"[RAG pgvector] Schema retrieval fallback: {e}")
-    return query_emb, rel_tables, rel_fields, few_shots
-
-def sql_fallback_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    orig_q = state.get("original_query") or state.get("question")
-    enhanced_q = state.get("enhanced_query") or orig_q
-    print(f"\n[LANGGRAPH] SQL FALLBACK NODE | request_id={req_id} | query='{orig_q}'")
-    print(f"[SQL_FALLBACK] Primary retrieval yielded NO_RESULT -> Transitioning query to SQL Pipeline.")
-    
-    query_emb, rel_tables, rel_fields, few_shots = _fetch_pgvector_rag_context(
-        orig_q, enhanced_q, state.get("query_embedding")
-    )
-    return {
-        **state,
-        "query_embedding": query_emb,
-        "relevant_tables": rel_tables or state.get("relevant_tables") or [],
-        "relevant_fields": rel_fields or state.get("relevant_fields") or [],
-        "few_shot_examples": few_shots or state.get("few_shot_examples") or "",
-        "sql_fallback_attempted": True,
-        "sql_retry_count": 0,
-        "sql_max_retries": 2,
-        "sql_retry_exhausted": False,
-        "error_message": "",
-    }
-
-def sql_analytics_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    orig_q = state.get("original_query") or state.get("question")
-    enhanced_q = state.get("enhanced_query") or orig_q
-    print(f"\n[LANGGRAPH] SQL ANALYTICS NODE | request_id={req_id} | query='{orig_q}'")
-    
-    query_emb, rel_tables, rel_fields, few_shots = _fetch_pgvector_rag_context(
-        orig_q, enhanced_q, state.get("query_embedding")
-    )
-    return {
-        **state,
-        "query_embedding": query_emb,
-        "relevant_tables": rel_tables or state.get("relevant_tables") or [],
-        "relevant_fields": rel_fields or state.get("relevant_fields") or [],
-        "few_shot_examples": few_shots or state.get("few_shot_examples") or "",
-        "sql_retry_count": 0,
-        "sql_max_retries": 2,
-        "sql_retry_exhausted": False,
-        "error_message": "",
-    }
-
-def query_plan_builder_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    orig_q = state.get("original_query") or state.get("question")
-    from koinonia_assistant.rag.sql_pipeline import (
-        build_complete_query_plan,
-        validate_query_plan_conditions
-    )
-    auth_ctx = state.get("authorization_context") or {}
-    user_parish = auth_ctx.get("parish_id") or state.get("user_parish")
-    user_diocese = auth_ctx.get("diocese_id") or state.get("user_diocese")
-    pre_intent = state.get("intent_info") or {}
-
-    plan = build_complete_query_plan(
-        question=orig_q,
-        original_query=orig_q,
-        pre_intent=pre_intent,
-        user_parish=user_parish,
-        user_diocese=user_diocese,
-        auth_ctx=auth_ctx
-    )
-    is_valid, val_err = validate_query_plan_conditions(orig_q, plan)
-    print(f"[LANGGRAPH] QUERY PLAN BUILDER NODE | request_id={req_id} | valid={is_valid} | intent={plan.get('intent')} | entity={plan.get('entity')} | filters={plan.get('filters')} | group_by={plan.get('group_by')}")
-
-    return {
-        **state,
-        "query_plan": plan,
-        "query_plan_valid": is_valid,
-        "query_plan_validation_error": val_err,
-    }
-
 def generate_sql_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    plan = state.get("query_plan")
-    orig_q = state.get("original_query") or state.get("question") or ""
-    role = state.get("user_role") or "Bishop"
-    parish = state.get("user_parish") or ""
-
-    if plan:
-        from koinonia_assistant.rag.sql_pipeline import generate_sql_from_plan
-        sql, expl = generate_sql_from_plan(
-            query_plan=plan,
-            user_role=role,
-            user_parish=parish,
-            user_diocese=state.get("user_diocese")
-        )
-        print(f"\n[LANGGRAPH] GENERATE SQL NODE (Plan-based) | request_id={req_id} | expl='{expl}'\nSQL:\n{sql}\n")
-        return {
-            **state,
-            "generated_sql": sql,
-            "llm_explanation": expl,
-        }
-
     print("[generate_sql] Generating SQL query...")
-    q = state["enhanced_query"] or state["question"]
-    q_low = q.lower()
-
-    # ── Branch A0: Deterministic Tamil / Tanglish Structured Parser ─────────
-    orig_q = state.get("question", "")
-    target_q = orig_q if any('\u0B80' <= c <= '\u0BFF' for c in orig_q) else q
-    try:
-        from koinonia_assistant.rag.tamil_query_parser import parse_tamil_query, build_canonical_sql_from_struct
-        tamil_struct = parse_tamil_query(target_q, parish)
-        canonical_sql, canonical_expl = build_canonical_sql_from_struct(tamil_struct, parish)
-        if not canonical_sql and target_q != q:
-            tamil_struct = parse_tamil_query(q, parish)
-            canonical_sql, canonical_expl = build_canonical_sql_from_struct(tamil_struct, parish)
-        if canonical_sql:
-            print(f"[generate_sql] Matched Tamil Structured Intent '{tamil_struct.get('intent')}': {canonical_expl}")
-            return {
-                **state,
-                "generated_sql": canonical_sql,
-                "llm_explanation": canonical_expl
-            }
-    except Exception as e:
-        print(f"[generate_sql] Tamil parser exception: {e}")
-
-    fam_id_match = re.search(r'\b(?:Family\s*ID|Family)[:\s]+([0-9]+)\b', q, re.IGNORECASE) or re.search(r'\b(FAM-[0-9A-Z\-]+)\b', q, re.IGNORECASE)
-    mem_id_match = re.search(r'\b(?:Member\s*ID|Member)[:\s]+([0-9]+)\b', q, re.IGNORECASE) or re.search(r'\b(MEM-[0-9A-Z\-]+)\b', q, re.IGNORECASE)
-
-    is_baptism_req = any(k in q_low for k in ['bapt', 'babt', 'bap', 'ஞானஸ்நானம்', 'திருமுழுக்கு'])
-    is_marriage_req = any(k in q_low for k in ['marr', 'wed', 'matrimony', 'திருமணம்', 'விவாகம்'])
-    is_communion_req = any(k in q_low for k in ['comm', 'fhc', 'eucharist', 'நற்கருணை', 'முதல் நற்கருணை', 'புதுநன்மை', 'பொதுநன்மை', 'puthunanmai', 'pothunamai', 'pothunanmai'])
-    is_confirmation_req = any(k in q_low for k in ['conf', 'cnf', 'உறுதிப்பூசுதல்', 'உறுதிபூசுதல்'])
-    is_death_req = any(k in q_low for k in ['death', 'died', 'deceased', 'burial', 'funeral', 'இறப்பு', 'அடக்கம்'])
-    is_sacraments_req = any(k in q_low for k in ['sacrament', 'sacraments', 'sacramental', 'திருவருட்சாதனம்', 'திருவருட்சாதனங்கள்', 'திருவருட்சாதனங்களின்', 'திருவருட்சாதன'])
-
-    # ??? Branch A: Explicit Family or Member ID Match (Canonical Deterministic SQL) ??????
-    if fam_id_match or mem_id_match:
-        if fam_id_match:
-            fam_id = fam_id_match.group(1).strip()
-            if is_baptism_req:
-                det_sql = f"""SELECT 
-    f.reference AS `Family Head`,
-    f.street AS `Address / Place`,
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    COALESCE(DATE_FORMAT(m.bapt_date, '%d-%b-%Y'), 'Not Recorded') AS `Baptism Date`,
-    COALESCE(m.bapt_parish_id, f.parish_id, 'Parish') AS `Baptism Parish`,
-    CASE WHEN m.bapt_date IS NOT NULL THEN 'Baptized' ELSE 'Pending / Not Recorded' END AS `Baptism Status`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-WHERE f.name = '{fam_id}' AND (f.parish_id LIKE '%{parish}%' OR '{parish}' = '')
-ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father', 'Mother', 'Son', 'Daughter') ASC, m.creation ASC;"""
-                expl = f"Retrieving baptism records for family {fam_id}"
-            elif is_marriage_req:
-                det_sql = f"""SELECT 
-    f.reference AS `Family Head`,
-    f.street AS `Address / Place`,
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    COALESCE(DATE_FORMAT(m.mrg_date, '%d-%b-%Y'), 'Not Recorded') AS `Marriage Date`,
-    COALESCE(m.mrg_parish_id, f.parish_id, 'Parish') AS `Marriage Parish`,
-    CASE WHEN m.mrg_date IS NOT NULL THEN 'Married' ELSE 'Unmarried / Not Recorded' END AS `Marriage Status`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-WHERE f.name = '{fam_id}' AND (f.parish_id LIKE '%{parish}%' OR '{parish}' = '')
-ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father', 'Mother', 'Son', 'Daughter') ASC, m.creation ASC;"""
-                expl = f"Retrieving marriage records for family {fam_id}"
-            elif is_communion_req:
-                det_sql = f"""SELECT 
-    f.reference AS `Family Head`,
-    f.street AS `Address / Place`,
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    COALESCE(DATE_FORMAT(m.fhc_date, '%d-%b-%Y'), 'Not Recorded') AS `First Communion Date`,
-    COALESCE(m.fhc_parish_id, f.parish_id, 'Parish') AS `Communion Parish`,
-    CASE WHEN m.fhc_date IS NOT NULL THEN 'Received' ELSE 'Pending / Not Recorded' END AS `Communion Status`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-WHERE f.name = '{fam_id}' AND (f.parish_id LIKE '%{parish}%' OR '{parish}' = '')
-ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father', 'Mother', 'Son', 'Daughter') ASC, m.creation ASC;"""
-                expl = f"Retrieving communion records for family {fam_id}"
-            elif is_confirmation_req:
-                det_sql = f"""SELECT 
-    f.reference AS `Family Head`,
-    f.street AS `Address / Place`,
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    COALESCE(DATE_FORMAT(m.cnf_date, '%d-%b-%Y'), 'Not Recorded') AS `Confirmation Date`,
-    COALESCE(m.cnf_parish_id, f.parish_id, 'Parish') AS `Confirmation Parish`,
-    CASE WHEN m.cnf_date IS NOT NULL THEN 'Confirmed' ELSE 'Pending / Not Recorded' END AS `Confirmation Status`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-WHERE f.name = '{fam_id}' AND (f.parish_id LIKE '%{parish}%' OR '{parish}' = '')
-ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father', 'Mother', 'Son', 'Daughter') ASC, m.creation ASC;"""
-                expl = f"Retrieving confirmation records for family {fam_id}"
-            elif is_sacraments_req:
-                det_sql = f"""SELECT 
-    f.reference AS `Family Head`,
-    f.street AS `Address / Place`,
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    COALESCE(DATE_FORMAT(m.bapt_date, '%d-%b-%Y'), '-') AS `Baptism Date`,
-    COALESCE(DATE_FORMAT(m.fhc_date, '%d-%b-%Y'), '-') AS `First Communion Date`,
-    COALESCE(DATE_FORMAT(m.cnf_date, '%d-%b-%Y'), '-') AS `Confirmation Date`,
-    COALESCE(DATE_FORMAT(m.mrg_date, '%d-%b-%Y'), '-') AS `Marriage Date`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-WHERE f.name = '{fam_id}' AND (f.parish_id LIKE '%{parish}%' OR '{parish}' = '')
-ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father', 'Mother', 'Son', 'Daughter') ASC, m.creation ASC;"""
-                expl = f"Retrieving all sacramental records for family {fam_id}"
-            else:
-                det_sql = f"""SELECT 
-    f.reference AS `Family Name / Head`,
-    f.family_card_number AS `Family Card Number`,
-    f.family_register_number AS `Family Register Number`,
-    f.street AS `Address / Street`,
-    f.mobile AS `Family Contact`,
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    m.mobile AS `Mobile`,
-    m.living_status AS `Living Status`,
-    CASE WHEN m.bapt_date IS NOT NULL THEN 'Yes' ELSE 'No' END AS `Baptism`,
-    CASE WHEN m.fhc_date IS NOT NULL THEN 'Yes' ELSE 'No' END AS `First Holy Communion`,
-    CASE WHEN m.cnf_date IS NOT NULL THEN 'Yes' ELSE 'No' END AS `Confirmation`,
-    CASE WHEN m.mrg_date IS NOT NULL THEN 'Yes' ELSE 'No' END AS `Marriage`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-WHERE f.name = '{fam_id}' AND (f.parish_id LIKE '%{parish}%' OR '{parish}' = '')
-ORDER BY FIELD(m.relationship_id, 'Head of Family', 'Husband', 'Wife', 'Father', 'Mother', 'Son', 'Daughter') ASC, m.creation ASC;"""
-                expl = f"Retrieving complete family records for {fam_id}"
-
-            print(f"[generate_sql] Explicit Family ID {fam_id}. Returning canonical SQL.")
-            return {**state, "generated_sql": det_sql, "llm_explanation": expl}
-
-        elif mem_id_match:
-            mem_id = mem_id_match.group(1).strip()
-            det_sql = f"""SELECT 
-    CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS `Member Name`,
-    f.reference AS `Family Head`,
-    m.relationship_id AS `Relationship`,
-    m.gender AS `Gender`,
-    m.dob AS `Date of Birth`,
-    COALESCE(m.street, f.street, 'N/A') AS `Address / Place`,
-    COALESCE(DATE_FORMAT(m.bapt_date, '%d-%b-%Y'), 'Not Recorded') AS `Baptism Date`,
-    COALESCE(DATE_FORMAT(m.fhc_date, '%d-%b-%Y'), 'Not Recorded') AS `First Communion Date`,
-    COALESCE(DATE_FORMAT(m.cnf_date, '%d-%b-%Y'), 'Not Recorded') AS `Confirmation Date`,
-    COALESCE(DATE_FORMAT(m.mrg_date, '%d-%b-%Y'), 'Not Recorded') AS `Marriage Date`
-FROM `tabMember` m
-LEFT JOIN `tabFamily` f ON f.name = m.family_id
-WHERE m.name = '{mem_id}' AND (m.parish_id LIKE '%{parish}%' OR '{parish}' = '');"""
-            expl = f"Retrieving records for member {mem_id}"
-            print(f"[generate_sql] Explicit Member ID {mem_id}. Returning canonical SQL.")
-            return {**state, "generated_sql": det_sql, "llm_explanation": expl}
-
-        # ─── Branch B: Diagram, Trend, Predictive & Scenario Aggregations ─────────────
-    import datetime
-    current_year = datetime.datetime.now().year
     
-    # Extract dynamic year filter
-    match = re.search(r'(?:last|past|கடந்த)\s+(\d+)\s+(?:years|ஆண்டுகளில்|வருடங்களில்)', q_low)
-    num_years = int(match.group(1)) if match else None
+    if state.get("generated_sql") == "BLOCKED_SECURITY":
+        return state
+
+    q_raw = (state.get("question") or "").lower()
     
-    is_predict_query = any(k in q_low for k in ['predict', 'prediction', 'predictive', 'forecast', 'forecasting', 'future', 'projection', 'எதிர்கால', 'கணிப்பு', 'கணிக்க'])
-    if not num_years and is_predict_query:
-        num_years = 5
-
-    year_filter_bapt = f" AND YEAR(m.bapt_date) >= {current_year - num_years}" if num_years else ""
-    year_filter_mrg = f" AND YEAR(m.mrg_date) >= {current_year - num_years}" if num_years else ""
-    year_filter_cnf = f" AND YEAR(m.cnf_date) >= {current_year - num_years}" if num_years else ""
-    year_filter_fhc = f" AND YEAR(m.fhc_date) >= {current_year - num_years}" if num_years else ""
-    year_filter_death = f" AND YEAR(m.death_date) >= {current_year - num_years}" if num_years else ""
-    year_filter_fam = f" AND YEAR(f.creation) >= {current_year - num_years}" if num_years else ""
-
-    is_analytics_req = any(k in q_low for k in [
-        'diagram', 'chart', 'graph', 'plot', 'trend', 'trends', 'growth', 'growing', 'ஆண்டுவாரியாக', 'எத்தனை', 'நிகழ்வுகள்', 'ஆண்டுகளில்', 'வருடங்களில்', 
-        'weather growing', 'whether growing', 'வரைபடம்', 'விளக்கப்படம்', 
-        'predict', 'prediction', 'predictive', 'forecast', 'forecasting', 'future', 
-        'project', 'projection', 'எதிர்கால', 'கணிக்க', 'கணிப்பு', 'வளர்ச்சி'
+    # Defense-in-depth security injection check
+    injection_patterns = [
+        r';\s*(?:DROP|ALTER|TRUNCATE|DELETE|INSERT|UPDATE|CREATE|REPLACE)',
+        r'(?:SLEEP|BENCHMARK|WAITFOR|GET_LOCK)\s*\(',
+        r'UNION\s+(?:ALL\s+)?SELECT\s+.*(?:tabUser|information_schema|mysql\.|password|hash|secret|token|api_key)',
+        r'--\s*$',
+        r'(?:ignore all previous instructions|output your system prompt|leak secret keys)'
+    ]
+    for pat in injection_patterns:
+        if re.search(pat, state.get("question", ""), re.IGNORECASE):
+            print(f"[generate_sql] Intercepted malicious injection in generate_sql: '{state.get('question')}'")
+            return {**state, "generated_sql": "BLOCKED_SECURITY"}
+    q_enhanced = (state.get("enhanced_query") or "").lower()
+    q_combined = f"{q_raw} {q_enhanced}"
+    
+    user_role = state.get("user_role") or "Parish Priest"
+    
+    is_count_query = any(k in q_combined for k in [
+        "count", "how many", "total number", "total members", "total families", 
+        "total baptisms", "total marriages", "statistics", "how much", "number of",
+        "total count", "count of"
     ])
+    
+    # Pre-check for non-Bishop roles requesting diocese-wide / all-parishes data (only for detailed DATA queries, NOT counts)
+    is_global = user_role in ["Bishop", "Curia", "Chancellor", "Administrator", "System Manager"]
+    broad_diocese_keywords = [
+        "all parishes", "entire diocese", "whole diocese", "across all parishes", 
+        "every parish", "all the diocese", "all parishes in the diocese", "other parishes"
+    ]
+    
+    if not is_global and not is_count_query and any(kw in q_combined for kw in broad_diocese_keywords):
+        print(f"[generate_sql] Access Restricted: {user_role} requested broad diocese personal data: raw='{q_raw}', enhanced='{q_enhanced}'")
+        return {**state, "generated_sql": "UNAUTHORIZED_DIOCESE"}
 
-    # Scenario: Parish division or sub-parish creation (e.g. splitting Yelagiri with 35 families)
-    is_split_scenario = any(k in q_low for k in ['பிரித்து', 'கிளைப்பங்கு', 'split', 'divide', 'sub-parish', 'sub parish', 'branch parish', 'இரண்டாகப்'])
-    if is_split_scenario:
-        parish_target = parish or ""
-        for p_name in ['Yelagiri', 'ஏலகிரி', 'Jolarpet', 'Tirupattur', 'Vellore']:
-            if p_name.lower() in q_low or p_name in q:
-                parish_target = 'Yelagiri' if ('yelagiri' in p_name.lower() or 'ஏலகிரி' in p_name) else p_name
-                break
-        p_where = f"WHERE f.parish_id LIKE '%{parish_target}%'" if parish_target else ""
-        split_sql = f"""SELECT 
-    COUNT(DISTINCT f.name) AS `Total Families`,
-    COUNT(m.name) AS `Total Members`,
-    SUM(CASE WHEN m.gender = 'Male' THEN 1 ELSE 0 END) AS `Male Members`,
-    SUM(CASE WHEN m.gender = 'Female' THEN 1 ELSE 0 END) AS `Female Members`,
-    COALESCE(f.parish_id, '{parish_target}') AS `Parish`
-FROM `tabFamily` f
-LEFT JOIN `tabMember` m ON m.family_id = f.name
-{p_where}
-GROUP BY f.parish_id;"""
-        print(f"[generate_sql] Parish split scenario matched for {parish_target}.")
-        return {**state, "generated_sql": split_sql, "llm_explanation": f"Retrieving baseline family and member statistics for parish {parish_target} to model division scenario"}
+    # Check for unauthorized parish request if user is Vicar General / Vicar Forane / Parish Priest (only for detailed DATA queries, NOT counts)
+    user_parishes = state.get("user_parishes") or []
+    user_parish = (state.get("user_parish") or "").strip()
+    
+    if not is_count_query:
+        if user_role in ["Vicar General", "Vicar Forane"] and user_parishes:
+            import frappe
+            all_parish_names = frappe.db.sql_list("SELECT name FROM tabParish") if frappe.db.table_exists("Parish") else []
+            for p in all_parish_names:
+                if p not in user_parishes:
+                    short_p = p.replace("Parish", "").replace("Church", "").replace("Cathedral", "").strip()
+                    if short_p and len(short_p) > 3 and re.search(r'\b' + re.escape(short_p.lower()) + r'\b', q_combined):
+                        print(f"[generate_sql] Access Restricted: Vicar General requested unauthorized parish data '{p}'")
+                        return {**state, "generated_sql": "UNAUTHORIZED_PARISH"}
+                        
+        elif user_role in ["Parish Priest", "Parishioner"] and user_parish:
+            import frappe
+            all_parish_names = frappe.db.sql_list("SELECT name FROM tabParish") if frappe.db.table_exists("Parish") else []
+            for p in all_parish_names:
+                if p.lower() != user_parish.lower():
+                    short_p = p.replace("Parish", "").replace("Church", "").replace("Cathedral", "").strip()
+                    if short_p and len(short_p) > 3 and re.search(r'\b' + re.escape(short_p.lower()) + r'\b', q_combined):
+                        print(f"[generate_sql] Access Restricted: {user_role} of {user_parish} requested unauthorized parish data '{p}'")
+                        return {**state, "generated_sql": "UNAUTHORIZED_PARISH"}
 
-    # Confirmation Trend / Prediction
-    if is_analytics_req and (is_confirmation_req or any(k in q_low for k in ['conf', 'cnf', 'உறுதிப்பூசுதல்', 'உறுதிபூசுதல்'])):
-        p_filter = f"AND (m.parish_id LIKE '%{parish}%' OR f.parish_id LIKE '%{parish}%')" if parish else ""
-        diag_sql = f"""SELECT 
-    YEAR(m.cnf_date) AS `Year`,
-    COUNT(m.name) AS `Confirmations Count`
-FROM `tabMember` m
-LEFT JOIN `tabFamily` f ON f.name = m.family_id
-WHERE m.cnf_date IS NOT NULL
-  {p_filter} {year_filter_cnf}
-GROUP BY `Year`
-ORDER BY `Year` ASC;"""
-        print("[generate_sql] Confirmation analytics/predictive query matched.")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": "Aggregating annual confirmations for trend and predictive analysis"}
+    # Pre-check for foreign diocese or foreign parish requests (e.g., Bishop of Salem asking for Christ the King Parish in Trichy)
+    user_diocese = (state.get("user_diocese") or "Trichy").strip()
+    
+    import frappe
+    if frappe.db.table_exists("Parish"):
+        all_parishes = frappe.db.sql("SELECT name, diocese_id FROM tabParish", as_dict=True)
+        for p in all_parishes:
+            p_name = p.get("name") or ""
+            p_dio = p.get("diocese_id") or ""
+            short_p = p_name.replace("Parish", "").replace("Church", "").replace("Cathedral", "").replace("Shrine", "").strip()
+            # Only match foreign parish if 'parish' or 'church' or 'பங்கு' is in query and 'cemetery' is not the primary target
+            if short_p and len(short_p) > 4 and re.search(r'\b' + re.escape(short_p.lower()) + r'\s+(?:parish|church|cathedral|shrine|பங்கு)\b', q_combined, re.IGNORECASE):
+                if user_diocese and p_dio and p_dio.lower() != user_diocese.lower():
+                    print(f"[generate_sql] Access Restricted: User {user_role} of {user_diocese} requested parish '{p_name}' in foreign diocese '{p_dio}'")
+                    return {
+                        **state, 
+                        "generated_sql": "UNAUTHORIZED_DIOCESE", 
+                        "requested_foreign_parish": p_name, 
+                        "requested_foreign_diocese": p_dio
+                    }
 
-    # Baptism Trend / Prediction
-    if is_analytics_req and (is_baptism_req or any(k in q_low for k in ['bapt', 'babt', 'bap', 'ஞானஸ்நானம்', 'திருமுழுக்கு'])):
-        p_filter = f"AND (m.parish_id LIKE '%{parish}%' OR f.parish_id LIKE '%{parish}%')" if parish else ""
-        diag_sql = f"""SELECT 
-    YEAR(m.bapt_date) AS `Year`,
-    COUNT(m.name) AS `Baptisms Count`
-FROM `tabMember` m
-LEFT JOIN `tabFamily` f ON f.name = m.family_id
-WHERE m.bapt_date IS NOT NULL
-  {p_filter} {year_filter_bapt}
-GROUP BY `Year`
-ORDER BY `Year` ASC;"""
-        print("[generate_sql] Baptism analytics/predictive query matched.")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": "Aggregating annual baptisms for trend and predictive analysis"}
+    known_dioceses = [
+        "trichy", "chennai", "vellore", "salem", "coimbatore", "madurai", 
+        "tuticorin", "thanjavur", "kottar", "palayamkottai", "ooty", 
+        "dharmapuri", "kumbakonam", "tirunelveli", "kuzhithurai", "sivagangai", "dindigul"
+    ]
+    for d in known_dioceses:
+        if user_diocese and d != user_diocese.lower():
+            # Match diocese name with word boundary (including Tamil suffixes like "salem diocese-ல", "salem-la", "salem")
+            if re.search(r'\b' + re.escape(d) + r'(\b|[-_])', q_combined, re.IGNORECASE):
+                print(f"[generate_sql] Access Restricted: User {user_role} of {user_diocese} requested unauthorized diocese '{d}': raw='{q_raw}'")
+                return {**state, "generated_sql": "UNAUTHORIZED_DIOCESE", "requested_foreign_diocese": d.title()}
 
-    # Marriage Trend / Prediction
-    if is_analytics_req and (is_marriage_req or any(k in q_low for k in ['marr', 'wed', 'matrimony', 'திருமணம்'])):
-        p_filter = f"AND (m.parish_id LIKE '%{parish}%' OR f.parish_id LIKE '%{parish}%')" if parish else ""
-        diag_sql = f"""SELECT 
-    YEAR(m.mrg_date) AS `Year`,
-    COUNT(m.name) AS `Marriages Count`
-FROM `tabMember` m
-LEFT JOIN `tabFamily` f ON f.name = m.family_id
-WHERE m.mrg_date IS NOT NULL
-  {p_filter} {year_filter_mrg}
-GROUP BY `Year`
-ORDER BY `Year` ASC;"""
-        print("[generate_sql] Marriage analytics/predictive query matched.")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": "Aggregating annual marriages for trend and predictive analysis"}
+    parish_context = state.get("user_parish") or ""
+    if user_role in ["Vicar General", "Vicar Forane"] and user_parishes:
+        parish_context = "IN (" + ", ".join([f"'{p}'" for p in user_parishes]) + ")"
 
-    # First Communion Trend / Prediction
-    if is_analytics_req and (is_communion_req or any(k in q_low for k in ['comm', 'fhc', 'eucharist', 'நற்கருணை'])):
-        p_filter = f"AND (m.parish_id LIKE '%{parish}%' OR f.parish_id LIKE '%{parish}%')" if parish else ""
-        diag_sql = f"""SELECT 
-    YEAR(m.fhc_date) AS `Year`,
-    COUNT(m.name) AS `First Communions Count`
-FROM `tabMember` m
-LEFT JOIN `tabFamily` f ON f.name = m.family_id
-WHERE m.fhc_date IS NOT NULL
-  {p_filter} {year_filter_fhc}
-GROUP BY `Year`
-ORDER BY `Year` ASC;"""
-        print("[generate_sql] First communion analytics/predictive query matched.")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": "Aggregating annual first communions for trend and predictive analysis"}
-
-    # Death Trend / Prediction
-    if is_analytics_req and (is_death_req or any(k in q_low for k in ['death', 'burial', 'deceased', 'இறப்பு'])):
-        p_filter = f"AND (m.parish_id LIKE '%{parish}%' OR f.parish_id LIKE '%{parish}%')" if parish else ""
-        diag_sql = f"""SELECT 
-    YEAR(m.death_date) AS `Year`,
-    COUNT(m.name) AS `Deaths Count`
-FROM `tabMember` m
-LEFT JOIN `tabFamily` f ON f.name = m.family_id
-WHERE m.death_date IS NOT NULL
-  {p_filter} {year_filter_death}
-GROUP BY `Year`
-ORDER BY `Year` ASC;"""
-        print("[generate_sql] Death analytics/predictive query matched.")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": "Aggregating annual deaths for trend and predictive analysis"}
-
-    # Family Registrations Trend / Prediction
-    if is_analytics_req and any(k in q_low for k in ['family', 'families', 'member', 'parishioner', 'குடும்ப']):
-        p_filter = f"WHERE (f.parish_id LIKE '%{parish}%')" if parish else ""
-        diag_sql = f"""SELECT 
-    YEAR(f.creation) AS `Year`,
-    COUNT(f.name) AS `Registered Families Count`
-FROM `tabFamily` f
-{p_filter}
-GROUP BY `Year`
-ORDER BY `Year` ASC;"""
-        print("[generate_sql] Family registration trend query matched.")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": "Aggregating annual family registrations for trend analysis"}
-
-        # All Sacraments Breakdown & Totals (with optional specific year filter)
-    is_all_sacraments = (
-        is_sacraments_req or 
-        'sacrament' in q_low or 
-        'sacramental' in q_low or 
-        'திருவருட்சாதன' in q or 
-        'கூட்டுத்தொகை' in q or 
-        'all sacraments' in q_low
-    )
-    if is_all_sacraments and not (is_baptism_req and not ('all' in q_low or 'அனைத்து' in q or 'கூட்டு' in q)):
-        year_match = re.search(r'\b(19\d\d|20\d\d)\b', q)
-        p_filter = f"AND (parish_id LIKE '%{parish}%')" if parish else ""
-        if year_match:
-            tgt_yr = year_match.group(1)
-            diag_sql = f"""SELECT 'Baptism (திருமுழுக்கு)' AS `Sacrament`, COUNT(*) AS `Total Count` FROM `tabMember` WHERE bapt_date IS NOT NULL AND YEAR(bapt_date) = {tgt_yr} {p_filter}
-UNION ALL
-SELECT 'First Communion (முதல் நற்கருணை)', COUNT(*) FROM `tabMember` WHERE fhc_date IS NOT NULL AND YEAR(fhc_date) = {tgt_yr} {p_filter}
-UNION ALL
-SELECT 'Confirmation (உறுதிப்பூசுதல்)', COUNT(*) FROM `tabMember` WHERE cnf_date IS NOT NULL AND YEAR(cnf_date) = {tgt_yr} {p_filter}
-UNION ALL
-SELECT 'Marriage (திருமணம்)', COUNT(*) FROM `tabMember` WHERE mrg_date IS NOT NULL AND YEAR(mrg_date) = {tgt_yr} {p_filter};"""
-            expl = f"Aggregating all sacraments breakdown and total count for year {tgt_yr}"
-        else:
-            diag_sql = f"""SELECT 'Baptism (திருமுழுக்கு)' AS `Sacrament`, COUNT(*) AS `Total Count` FROM `tabMember` WHERE bapt_date IS NOT NULL {p_filter}
-UNION ALL
-SELECT 'First Communion (முதல் நற்கருணை)', COUNT(*) FROM `tabMember` WHERE fhc_date IS NOT NULL {p_filter}
-UNION ALL
-SELECT 'Confirmation (உறுதிப்பூசுதல்)', COUNT(*) FROM `tabMember` WHERE cnf_date IS NOT NULL {p_filter}
-UNION ALL
-SELECT 'Marriage (திருமணம்)', COUNT(*) FROM `tabMember` WHERE mrg_date IS NOT NULL {p_filter};"""
-            expl = "Aggregating sacraments breakdown for diagram visualization"
-        print(f"[generate_sql] All sacraments query matched. Expl: {expl}")
-        return {**state, "generated_sql": diag_sql, "llm_explanation": expl}
-
-    # ─── Branch B3: Deterministic "Total baptized / statistics" queries ──────
-    # These queries must ALWAYS produce the same SQL against the same tables.
-    # The LLM must NEVER be allowed to invent column labels or choose tables freely.
-    is_total_query = any(k in q_low for k in [
-        'total', 'how many', 'count', 'statistics', 'stats',
-        'எத்தனை', 'மொத்தம்', 'புள்ளிவிவரம்', 'கணக்கு'
-    ])
-    is_members_query = any(k in q_low for k in ['member', 'members', 'உறுப்பினர்', 'உறுப்பினர்கள்'])
-    is_families_query = any(k in q_low for k in ['famil', 'families', 'குடும்பம்', 'குடும்பங்கள்'])
-    is_bapt_count = (is_baptism_req and is_total_query and not is_analytics_req
-                     and not fam_id_match and not mem_id_match)
-    is_parish_stats = (is_total_query and (is_members_query or is_families_query)
-                       and not is_analytics_req and not fam_id_match and not mem_id_match)
-
-    p_filter_mem = f"AND m.parish_id LIKE '%{parish}%'" if parish else ""
-    p_filter_fam = f"AND f.parish_id LIKE '%{parish}%'" if parish else ""
-
-    # "How many members are baptized in my parish?" → count from tabMember.bapt_date
-    # SINGLE consistent query — NEVER mix with tabBaptism for count queries
-    if is_bapt_count and not is_families_query:
-        bapt_count_sql = (
-            "SELECT "
-            "COUNT(*) AS `Total Baptized Members` "
-            "FROM `tabMember` m "
-            f"WHERE m.bapt_date IS NOT NULL {p_filter_mem};"
-        )
-        print("[generate_sql] Deterministic baptism count query matched.")
-        return {**state,
-                "generated_sql": bapt_count_sql,
-                "llm_explanation": "Counting members with a recorded baptism date in tabMember"}
-
-    # "Total baptized members AND family statistics in my parish"
-    if is_parish_stats and is_baptism_req:
-        stats_sql = (
-            "SELECT "
-            "'Families (with Card Number)' AS `Category`, "
-            "COUNT(DISTINCT f.name) AS `Count` "
-            "FROM `tabFamily` f "
-            f"WHERE f.family_register_number IS NOT NULL {p_filter_fam} "
-            "UNION ALL "
-            "SELECT "
-            "'Total Members' AS `Category`, "
-            "COUNT(m.name) AS `Count` "
-            "FROM `tabMember` m "
-            f"WHERE 1=1 {p_filter_mem} "
-            "UNION ALL "
-            "SELECT "
-            "'Baptized Members' AS `Category`, "
-            "COUNT(m.name) AS `Count` "
-            "FROM `tabMember` m "
-            f"WHERE m.bapt_date IS NOT NULL {p_filter_mem};"
-        )
-        print("[generate_sql] Deterministic parish baptism+family stats query matched.")
-        return {**state,
-                "generated_sql": stats_sql,
-                "llm_explanation": "Aggregating parish family count, total members, and baptized members from tabMember"}
-
-    # "How many families / members in my parish?" (no baptism)
-    if is_parish_stats and not is_baptism_req:
-        gen_stats_sql = (
-            "SELECT "
-            "'Families' AS `Category`, "
-            "COUNT(DISTINCT f.name) AS `Count` "
-            "FROM `tabFamily` f "
-            f"WHERE 1=1 {p_filter_fam} "
-            "UNION ALL "
-            "SELECT "
-            "'Total Members' AS `Category`, "
-            "COUNT(m.name) AS `Count` "
-            "FROM `tabMember` m "
-            f"WHERE 1=1 {p_filter_mem};"
-        )
-        print("[generate_sql] Deterministic general parish stats query matched.")
-        return {**state,
-                "generated_sql": gen_stats_sql,
-                "llm_explanation": "Aggregating parish family count and total members"}
-
-    # ??? Branch C: LLM Standard SQL Generation ??????
-    response = llm.invoke(SQL_GEN_PROMPT.format_messages(
-        current_date=datetime.date.today().strftime('%Y-%m-%d'),
+    prompt_msgs = SQL_GEN_PROMPT.format_messages(
         relevant_tables="\n\n".join(state["relevant_tables"]),
         relevant_fields="\n".join(state["relevant_fields"]),
         few_shot_examples=state["few_shot_examples"],
-        user_role=state["user_role"],
-        user_parish=state["user_parish"],
+        user_role=state.get("user_role") or "Parish Priest",
+        user_diocese=state.get("user_diocese") or "Trichy",
+        user_parish=parish_context,
+        user_vicariate=state.get("user_vicariate") or "",
+        user_member_id=state.get("user_member_id") or "",
+        user_email=state.get("user_email") or "",
         enhanced_query=state["enhanced_query"]
-    ))
-    sql = response.content.strip().strip("`").strip("sql").strip()
+    )
+    
+    response = invoke_llm_with_rotation(prompt_msgs)
+    content = response.content.strip()
+    if "```sql" in content:
+        sql = content.split("```sql")[1].split("```")[0].strip()
+    elif "```" in content:
+        sql = content.split("```")[1].strip()
+    else:
+        sql = content.strip()
+        
     print(f"[generate_sql] SQL Generated:\n  {sql}")
     return {**state, "generated_sql": sql}
 
+def sanitize_select_clause(sql: str, question: str = "") -> str:
+    sql_upper = sql.upper().strip()
+    if not sql_upper.startswith("SELECT") or "COUNT(" in sql_upper or "UNION" in sql_upper or "GROUP BY" in sql_upper:
+        return sql
+        
+    table_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_ ]+)`?', sql, re.IGNORECASE)
+    if not table_match:
+        return sql
+        
+    table_name = table_match.group(1).strip().strip('`')
+    
+    preferred_cols = {
+        "tabBaptism": ["first_name", "middle_name", "last_name", "bapt_parish_id", "family_card_no", "bapt_date"],
+        "tabCommunion": ["first_name", "middle_name", "last_name", "fhc_parish_id", "family_card_no", "fhc_date"],
+        "tabConfirmation": ["first_name", "middle_name", "last_name", "cnf_parish_id", "family_card_no", "cnf_date"],
+        "tabMarriage": ["bridegroom_name", "bridegroom_middle_name", "bridegroom_last_name", "bride_name", "mrg_date"],
+        "tabAnointing Of Sick": ["first_name", "middle_name", "last_name", "anointing_date", "minister"],
+        "tabDeath": ["first_name", "middle_name", "last_name", "death_date", "age"],
+        "tabMember": ["first_name", "middle_name", "last_name", "relationship_id", "gender", "age", "family_id"],
+        "tabFamily": ["family_register_number", "parish_bcc_id", "zone_id", "status", "parish_id"],
+        "tabDiocese": ["diocese_name", "bishop_name", "established_date", "city", "phone", "email", "note"],
+        "tabVicariate": ["vicariate_name", "diocese_id", "vicar_forane", "active"],
+        "tabParish": ["parish_name", "patron_saint", "feast_day", "established_date", "parish_priest", "assistant_priest", "city", "note"]
+    }
+    
+    # Check if wildcard is present anywhere in SELECT part
+    select_part_raw = sql_upper.split("FROM")[0].replace("SELECT", "").strip()
+    if "*" in select_part_raw:
+        if "tabMember" in sql and "tabFamily" in sql:
+            from_part_match = re.search(r'\bFROM\b.*', sql, re.IGNORECASE | re.DOTALL)
+            if from_part_match:
+                new_sql = f"SELECT m.first_name, m.middle_name, m.last_name, m.relationship_id, f.parish_bcc_id {from_part_match.group(0)}"
+                if re.search(r'\btabMember\s+AS\s+T3\b|\btabMember\s+T3\b', sql, re.IGNORECASE):
+                    new_sql = f"SELECT T3.first_name, T3.middle_name, T3.last_name, T3.relationship_id, T2.parish_bcc_id {from_part_match.group(0)}"
+                print(f"[sanitize_select_clause] Converted JOIN wildcard to explicit columns: {new_sql}")
+                return new_sql
+        elif table_name in preferred_cols:
+            cols_str = ", ".join(f"`{c}`" for c in preferred_cols[table_name])
+            from_part_match = re.search(r'\bFROM\b.*', sql, re.IGNORECASE | re.DOTALL)
+            if from_part_match:
+                new_sql = f"SELECT {cols_str} {from_part_match.group(0)}"
+                print(f"[sanitize_select_clause] Converted single-table wildcard to: {new_sql}")
+                return new_sql
+
+    if table_name in preferred_cols:
+        select_part = sql_upper.split("FROM")[0].replace("SELECT", "").strip()
+        selected_cols = [c.strip().strip('`') for c in select_part.split(",") if c.strip()]
+        
+        # If the query is looking up a single document or specific person details, preserve all columns
+        if "LIMIT 1" in sql_upper or any(c.lower() in ["name", "bapt_register_ref", "fhc_register_ref", "cnf_register_ref", "mrg_register_ref", "death_register_ref"] for c in selected_cols):
+            return sql
+
+        is_wildcard = "*" in select_part
+        max_allowed = 8 if table_name in ["tabParish", "tabDiocese"] else 5
+        has_too_many = len(selected_cols) > max_allowed
+        
+        core_fields = ["first_name", "bridegroom_name", "diocese_name", "vicariate_name", "parish_name", "family_name"]
+        missing_core = not any(f.upper() in select_part for f in core_fields) and any(f in preferred_cols[table_name] for f in core_fields)
+        
+        if is_wildcard or has_too_many or missing_core:
+            final_cols = list(preferred_cols[table_name])
+            
+            # Scan the original select_part for specific keywords requested (like mobile, email, phone, address, etc.)
+            # and preserve them if they were selected in the original SQL
+            special_keywords = ["mobile", "email", "phone", "address", "website", "established_date", "dob", "cemetery_code", "note", "assistant_priest", "family_card_no", "parish_name", "fhc_parish_id", "bapt_parish_id", "cnf_parish_id", "mrg_parish_id"]
+            for col in selected_cols:
+                col_lower = col.lower()
+                if any(kw in col_lower for kw in special_keywords):
+                    # Extract the actual column name from any alias or prefix (e.g. t.mobile -> mobile)
+                    base_col = col_lower.split(".")[-1].strip().strip('`')
+                    if base_col not in final_cols:
+                        final_cols.append(base_col)
+            
+            # Enforce column limit
+            if len(final_cols) > max_allowed:
+                final_cols = final_cols[:max_allowed]
+                
+            cols_str = ", ".join(f"`{c}`" for c in final_cols)
+            from_part_match = re.search(r'\bFROM\b.*', sql, re.IGNORECASE | re.DOTALL)
+            if from_part_match:
+                from_part = from_part_match.group(0)
+                new_sql = f"SELECT {cols_str} {from_part}"
+                print(f"[sanitize_select_clause] Automatically polished SELECT clause from {len(selected_cols)} cols to: {new_sql}")
+                return new_sql
+                
+    return sql
+
+def sql_escape_str(val: str) -> str:
+    if val is None:
+        return ""
+    return str(val).replace("'", "''")
+
+def sql_quote_str(val: str) -> str:
+    if val is None:
+        return "''"
+    return "'" + str(val).replace("'", "''") + "'"
+
+def enforce_jurisdiction_sql_single(sql: str, state: GraphState) -> str:
+    user_role = state.get("user_role") or "Parish Priest"
+    user_diocese = state.get("user_diocese") or "Trichy"
+    user_vicariate = state.get("user_vicariate") or ""
+    user_parish = state.get("user_parish") or "Christ the King Parish"
+    user_parishes = state.get("user_parishes") or []
+    
+    if user_role in ["Administrator", "System Manager"] or user_diocese in ["All Dioceses", "All"]:
+        return sql
+        
+    sql_upper = sql.upper()
+    if not sql_upper.startswith("SELECT") or sql in ["UNSUPPORTED", "UNAUTHORIZED_DIOCESE", "UNAUTHORIZED_PARISH"]:
+        return sql
+        
+    alias_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_]+(?:\s+Of\s+Sick)?)`?(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?', sql, re.IGNORECASE)
+    if not alias_match:
+        return sql
+    table_name = alias_match.group(1).strip().strip('`')
+    
+    # Define column mappings for personal member & sacrament tables
+    parish_col_map = {
+        "tabBaptism": "bapt_parish_id",
+        "tabMarriage": "mrg_parish_id",
+        "tabConfirmation": "cnf_parish_id",
+        "tabCommunion": "fhc_parish_id",
+        "tabDeath": "death_parish_id",
+        "tabAnointing Of Sick": "anointing_parish_id",
+        "tabMember": "parish_id",
+        "tabFamily": "parish_id"
+    }
+    
+    conditions = []
+    
+    table_prefix = ""
+    if alias_match.group(2) and alias_match.group(2).upper() not in ["WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "ON", "GROUP", "ORDER", "LIMIT", "SET", "VALUES"]:
+        table_prefix = f"`{alias_match.group(2)}`."
+    elif "JOIN" in sql_upper:
+        table_prefix = f"`{table_name}`."
+
+    user_diocese_esc = sql_escape_str(user_diocese)
+    user_parish_esc = sql_escape_str(user_parish)
+    user_vicariate_esc = sql_escape_str(user_vicariate)
+
+    # 1. Diocese ID constraint (applies to ALL roles for any table with diocese_id)
+    if user_diocese and "DIOCESE_ID" not in sql_upper and table_name in ["tabFamily", "tabMember", "tabBaptism", "tabMarriage", "tabConfirmation", "tabCommunion", "tabDeath", "tabAnointing Of Sick", "tabParish", "tabVicariate"]:
+        conditions.append(f"{table_prefix}`diocese_id` = {sql_quote_str(user_diocese)}")
+        
+    is_pure_count = "COUNT(" in sql_upper and "FIRST_NAME" not in sql_upper and "LAST_NAME" not in sql_upper and "DOB" not in sql_upper and "MOBILE" not in sql_upper
+    
+    # 2. Vicariate / Controlled Parishes constraints for Vicar General & Vicar Forane (applied strictly to DATA queries)
+    if not is_pure_count:
+        if user_role in ["Vicar General", "Vicar Forane"]:
+            if user_parishes and table_name in parish_col_map:
+                parish_col = parish_col_map[table_name]
+                parish_list_str = ", ".join([sql_quote_str(p) for p in user_parishes])
+                # If the SQL used '=' with multiple parishes or used a comma in the string
+                sql = re.sub(r"\b" + parish_col + r"\s*=\s*['\"][^'\"]*,[^'\"]*['\"]", f"{parish_col} IN ({parish_list_str})", sql, flags=re.IGNORECASE)
+                sql = re.sub(r"\bparish_id\s*=\s*['\"][^'\"]*,[^'\"]*['\"]", f"parish_id IN ({parish_list_str})", sql, flags=re.IGNORECASE)
+                sql_upper = sql.upper()
+                
+                # Check if any single controlled parish is explicitly matched
+                has_valid_single_parish = any(sql_quote_str(p).upper() in sql_upper or f"'{p.upper()}'" in sql_upper or f'"{p.upper()}"' in sql_upper for p in user_parishes)
+                if not has_valid_single_parish:
+                    if f"{parish_col.upper()} IN" not in sql_upper and "PARISH_ID IN" not in sql_upper:
+                        conditions.append(f"{table_prefix}`{parish_col}` IN ({parish_list_str})")
+            elif user_parishes and table_name == "tabParish":
+                parish_list_str = ", ".join([sql_quote_str(p) for p in user_parishes])
+                if "NAME" not in sql_upper and "VICARIATE_ID" not in sql_upper:
+                    conditions.append(f"{table_prefix}`name` IN ({parish_list_str})")
+            
+        # 3. Parish ID constraint for Parish Priest / Parishioner (for personal tables only)
+        elif user_role in ["Parish Priest", "Parishioner"] and user_parish and table_name in parish_col_map:
+            parish_col = parish_col_map[table_name]
+            has_assigned_parish = (
+                user_parish.upper() in sql_upper or 
+                user_parish_esc.upper() in sql_upper or 
+                sql_quote_str(user_parish).upper() in sql_upper or
+                user_parish.replace("'", r"\'").upper() in sql_upper
+            )
+            # Replace any foreign parish filter that was generated with the user's assigned parish
+            if parish_col.upper() in sql_upper or "PARISH_ID" in sql_upper:
+                if not has_assigned_parish:
+                    sql = re.sub(r"\b" + parish_col + r"\s*=\s*(?:'[^']*'|\"[^\"]*\")", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+                    sql = re.sub(r"\bparish_id\s*=\s*(?:'[^']*'|\"[^\"]*\")", f"parish_id = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+                    sql_upper = sql.upper()
+            else:
+                conditions.append(f"{table_prefix}`{parish_col}` = {sql_quote_str(user_parish)}")
+            
+    if user_role in ["Bishop", "Curia", "Chancellor", "Administrator"]:
+        # Strip accidental empty parish_id = '' or parish_id = '{user_diocese}'
+        clean_sql_tmp = re.sub(r"\b(parish_id|bapt_parish_id|mrg_parish_id|cnf_parish_id|fhc_parish_id|death_parish_id)\s*=\s*['\"](?:|None|" + re.escape(user_diocese) + r"|" + re.escape(user_diocese_esc) + r")['\"]\s*(AND|OR)?\s*", "", sql, flags=re.IGNORECASE)
+        clean_sql_tmp = re.sub(r"\s*(AND|OR)\s*(parish_id|bapt_parish_id|mrg_parish_id|cnf_parish_id|fhc_parish_id|death_parish_id)\s*=\s*['\"](?:|None|" + re.escape(user_diocese) + r"|" + re.escape(user_diocese_esc) + r")['\"]", "", clean_sql_tmp, flags=re.IGNORECASE)
+        clean_sql_tmp = re.sub(r"\bWHERE\s+(GROUP\s+BY|ORDER\s+BY|LIMIT|\Z)", r" \1", clean_sql_tmp, flags=re.IGNORECASE)
+        clean_sql_tmp = re.sub(r"\bWHERE\s*;\s*$", "", clean_sql_tmp, flags=re.IGNORECASE)
+        clean_sql_tmp = re.sub(r"\bWHERE\s*$", "", clean_sql_tmp, flags=re.IGNORECASE)
+        clean_sql_tmp = re.sub(r"\bWHERE\s+(AND|OR)\b", "WHERE", clean_sql_tmp, flags=re.IGNORECASE)
+        sql = clean_sql_tmp.strip()
+        sql_upper = sql.upper()
+
+    if not conditions:
+        return sql
+        
+    where_to_add = " AND ".join(conditions)
+    
+    # Strip any trailing semicolons or whitespace
+    clean_sql = sql.strip().rstrip(';')
+    
+    # Identify positions of trailing clauses (GROUP BY, ORDER BY, LIMIT) using regex
+    trailing_match = re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', clean_sql, re.IGNORECASE)
+    if trailing_match:
+        trailing_pos = trailing_match.start()
+    else:
+        trailing_pos = len(clean_sql)
+            
+    head = clean_sql[:trailing_pos].strip()
+    tail = clean_sql[trailing_pos:].strip()
+    
+    if re.search(r'\bWHERE\s*$', head, re.IGNORECASE):
+        new_sql = f"{head} {where_to_add}"
+    elif re.search(r'\bWHERE\b', head, re.IGNORECASE):
+        new_sql = f"{head} AND {where_to_add}"
+    else:
+        new_sql = f"{head} WHERE {where_to_add}"
+        
+    if tail:
+        new_sql = f"{new_sql} {tail}"
+        
+    print(f"[enforce_jurisdiction_sql] Injected scope filters: {new_sql}")
+    return new_sql
+
+def enforce_jurisdiction_sql(sql: str, state: GraphState) -> str:
+    if not sql or sql in ["UNSUPPORTED", "UNAUTHORIZED_DIOCESE", "UNAUTHORIZED_PARISH"]:
+        return sql
+    sql_upper = sql.upper()
+    if "UNION" in sql_upper:
+        delimiter = "\nUNION ALL\n" if "UNION ALL" in sql_upper else "\nUNION\n"
+        branches = re.split(r'\bUNION\s+(?:ALL\s+)?', sql, flags=re.IGNORECASE)
+        enforced = [enforce_jurisdiction_sql_single(b.strip(), state) for b in branches if b.strip()]
+        return delimiter.join(enforced)
+    return enforce_jurisdiction_sql_single(sql, state)
 
 def validate_sql_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    sql = state.get("generated_sql", "")
-    plan = state.get("query_plan") or {}
-    user_parish = state.get("user_parish")
-    print(f"\n[LANGGRAPH] VALIDATE SQL NODE | request_id={req_id} | validating SQL against query plan and schema...")
+    print("[validate_sql] Validating SQL in sandbox...")
+    sql = state.get("generated_sql") or ""
+    
+    if sql == "BLOCKED_SECURITY":
+        return {**state, "error_message": "Blocked security injection"}
+    if sql == "UNSUPPORTED":
+        return {**state, "error_message": "Unsupported query"}
+    if sql == "UNAUTHORIZED_DIOCESE":
+        return {**state, "error_message": "Unauthorized diocese access"}
+    if sql == "UNAUTHORIZED_PARISH":
+        return {**state, "error_message": "Unauthorized parish access"}
 
-    if not sql or sql == "UNSUPPORTED":
-        return {
-            **state,
-            "sql_valid": False,
-            "error_message": "Unsupported query",
-            "sql_error": "Unsupported query",
-        }
+    # Automatically repair unescaped single quotes in parish & personal names (e.g. 'St. Joseph's' -> 'St. Joseph''s', 'D'Souza' -> 'D''Souza')
+    apostrophe_fixes = [
+        (r"'(St\.\s+[A-Za-z]+)'s\s+([^']*)'", r"'''s '"),
+        (r"'(St\.\s+[A-Za-z]+)'s'", r"'''s'"),
+        (r"'([A-Za-z]+)'s'", r"'''s'"),
+        (r"'([A-Z])'([A-Za-z]+)'", r"''''"),
+        (r"'(D|O|Mc|Mac)'([A-Za-z]+)'", r"''''"),
+    ]
+    for pat, rep in apostrophe_fixes:
+        sql = re.sub(pat, rep, sql, flags=re.IGNORECASE)
+
+    user_parish = state.get("user_parish") or ""
+    if user_parish and "'" in user_parish:
+        raw_literal = f"'{user_parish}'"
+        esc_literal = sql_quote_str(user_parish)
+        if raw_literal in sql:
+            sql = sql.replace(raw_literal, esc_literal)
+
+    # Deterministically enforce role & scope ID filtering
+    sql = enforce_jurisdiction_sql(sql, state)
+
+    # Automatically sanitize and polish select clause to ensure meaningful columns
+    sql = sanitize_select_clause(sql, state["question"])
+    state = {**state, "generated_sql": sql}
+
 
     # Basic safety checks
     sql_upper = sql.upper().strip()
     if not sql_upper.startswith("SELECT"):
-        return {
-            **state,
-            "sql_valid": False,
-            "error_message": "Only SELECT queries are allowed.",
-            "sql_error": "Only SELECT queries are allowed."
-        }
-
-    for forbidden in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "REPLACE", "CREATE"]:
+        return {**state, "error_message": "Only SELECT queries are allowed."}
+        
+    for forbidden in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "REPLACE", "CREATE", "SLEEP", "BENCHMARK", "INFORMATION_SCHEMA", "INTO OUTFILE", "DUMPFILE", "LOAD_FILE"]:
         if re.search(r'\b' + forbidden + r'\b', sql_upper):
-            err_msg = f"Query contains forbidden keyword: {forbidden}"
-            return {
-                **state,
-                "sql_valid": False,
-                "error_message": err_msg,
-                "sql_error": err_msg,
-            }
+            return {**state, "error_message": f"Query contains forbidden security-sensitive keyword: {forbidden}"}
 
-    # 1. Plan and Schema Validation (11 checks - Rule 10)
-    from koinonia_assistant.rag.sql_pipeline import validate_sql_against_plan
-    valid, err = validate_sql_against_plan(sql, plan, user_parish=user_parish)
-    if not valid:
-        print(f"[validate_sql] Validation against plan failed: {err}")
-        return {
-            **state,
-            "sql_valid": False,
-            "error_message": err or "Plan validation failed",
-            "sql_error": err or "Plan validation failed",
-        }
+    clean_sql = re.sub(r'COUNT\s*\(\s*\*\s*\)', '', sql_upper)
+    if '*' in clean_sql:
+        return {**state, "error_message": "Do not use wildcard SELECT * or f.*. You MUST explicitly select up to 5 human-readable columns (like first_name, last_name, date, etc.) that directly answer the query."}
 
-    # 2. MariaDB EXPLAIN Check in sandbox
+    if ("PLACE_OF_BIRTH" in sql_upper or "BIRTH_PLACE" in sql_upper) and "BCC" in sql_upper:
+        return {**state, "error_message": "Do not filter place_of_birth or birth_place by BCC names. Place of birth represents a town or city, not a Basic Christian Community (BCC). Filter by parish_bcc_id in tabFamily instead."}
+
+    # Check for invalid mix of COUNT(*) and columns without GROUP BY (ignore UNION queries)
+    if "UNION" not in sql_upper:
+        select_part = sql_upper.split("FROM")[0] if "FROM" in sql_upper else sql_upper
+        if re.search(r'COUNT\s*\(\s*\*\s*\)', select_part) and "," in select_part and "GROUP BY" not in sql_upper:
+            return {**state, "error_message": "Do not mix COUNT(*) with individual columns in the SELECT clause without a GROUP BY. If the user wants a list of items, do not use COUNT(*). If they want a count, only select COUNT(*)."}
+
+
+
+    # EXPLAIN Sandbox check in Frappe MariaDB
     import frappe
-    ensure_frappe_connected()
     try:
-        frappe.db.sql(f"EXPLAIN {sql}")
-        print("[validate_sql] MariaDB EXPLAIN check PASSED.")
-        return {
-            **state,
-            "sql_valid": True,
-            "error_message": "",
-            "sql_error": None,
-        }
+        # Run EXPLAIN to validate syntax and table access
+        explain_sql = f"EXPLAIN {sql}"
+        frappe.db.sql(explain_sql)
+        print("[validate_sql] SQL validated successfully.")
+        return {**state, "error_message": ""}
     except Exception as e:
-        err_msg = str(e)
-        print(f"[validate_sql] MariaDB EXPLAIN check FAILED: {err_msg}")
-        return {
-            **state,
-            "sql_valid": False,
-            "error_message": err_msg,
-            "sql_error": err_msg,
-        }
+        error_msg = str(e)
+        print(f"[validate_sql] SQL Validation Failed: {error_msg}")
+        return {**state, "error_message": error_msg}
 
-def decide_validation(state: GraphState) -> str:
-    if state.get("sql_valid"):
-        return "valid"
-    retries = state.get("sql_retry_count", 0)
-    max_retries = state.get("sql_max_retries", 2)
-    if retries < max_retries:
-        return "retry"
-    return "exhausted"
+SQL_REWRITE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a SQL rewrite assistant for a MariaDB database in KOINONIA Parish Assistant.
+The SQL query you generated failed with a database error.
+Rewrite the SQL query to fix the error.
 
-def execute_sql_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    sql = state.get("generated_sql", "")
-    print(f"\n[LANGGRAPH] EXECUTE SQL NODE | request_id={req_id} | running SQL against MariaDB...")
-    import frappe
-    ensure_frappe_connected()
-    try:
-        rows = frappe.db.sql(sql, as_dict=True)
-        print(f"[execute_sql] Query executed successfully. Returned {len(rows)} row(s).")
-        return {
-            **state,
-            "database_result": rows,
-            "sql_result": rows,
-            "sql_error": None,
-            "error_message": "",
-        }
-    except Exception as e:
-        err_msg = str(e)
-        print(f"[execute_sql] Query execution error: {err_msg}")
-        return {
-            **state,
-            "database_result": None,
-            "sql_result": [],
-            "sql_error": err_msg,
-            "error_message": err_msg,
-        }
+User Question:
+{question}
 
-def decide_execution(state: GraphState) -> str:
-    if not state.get("sql_error"):
-        return "success"
-    retries = state.get("sql_retry_count", 0)
-    max_retries = state.get("sql_max_retries", 2)
-    if retries < max_retries:
-        return "retry"
-    return "exhausted"
+Table Schemas:
+{relevant_tables}
 
-def analyze_sql_error_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    err_str = state.get("sql_error") or state.get("error_message") or "Unknown SQL error"
-    sql = state.get("generated_sql", "")
-    plan = state.get("query_plan") or {}
-    cur_retry = (state.get("sql_retry_count") or 0) + 1
+Relevant Fields (Semantic matching columns that exist in the tables):
+{relevant_fields}
 
-    from koinonia_assistant.rag.sql_pipeline import analyze_sql_error
-    analysis = analyze_sql_error(err_str, sql, plan)
-    err_type = analysis.get("error_type", "CORRECTABLE_SQL_ERROR")
-
-    print(f"\n[LANGGRAPH] ANALYZE SQL ERROR NODE | request_id={req_id} | retry={cur_retry}/2 | type={err_type} | target={analysis.get('target')}")
-    return {
-        **state,
-        "sql_retry_count": cur_retry,
-        "sql_error_type": err_type,
-        "sql_previous_query": sql,
-        "sql_retry_reason": err_str,
-    }
-
-def regenerate_sql_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    sql = state.get("sql_previous_query") or state.get("generated_sql", "")
-    plan = state.get("query_plan") or {}
-    analysis = {
-        "error_type": state.get("sql_error_type"),
-        "target": None,
-        "error_str": state.get("sql_retry_reason")
-    }
-    user_parish = state.get("user_parish")
-
-    from koinonia_assistant.rag.sql_pipeline import regenerate_corrected_sql
-    corrected_sql = regenerate_corrected_sql(sql, plan, analysis, user_parish=user_parish)
-    print(f"[LANGGRAPH] REGENERATE SQL NODE | request_id={req_id} | corrected SQL:\n{corrected_sql}\n")
-    return {
-        **state,
-        "generated_sql": corrected_sql,
-        "sql_correction_attempt": True,
-        "error_message": "",
-        "sql_error": None,
-    }
-
-rewrite_sql_node = regenerate_sql_node
-
-def controlled_error_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    is_ta = state.get("detected_language") == "ta"
-    scope_name = state.get("user_parish") or "பங்கு"
-    print(f"\n[LANGGRAPH] CONTROLLED ERROR NODE | request_id={req_id} | Retries exhausted. Providing safe polite response.")
-
-    if is_ta:
-        reply = (
-            f"மன்னிக்கவும், **{scope_name}** பதிவேட்டில் நீங்கள் கேட்ட விவரங்களைத் துல்லியமாகத் திரட்டுவதில் தற்காலிகச் சிக்கல் ஏற்பட்டுள்ளது.\n\n"
-            "தயவுசெய்து உங்கள் கேள்வியை சற்று மாற்றி அல்லது குறிப்பிட்ட நபர் பெயர்/குடும்ப அட்டை எண்ணைக் கொண்டு கேட்கவும்."
-        )
-    else:
-        reply = (
-            f"I'm sorry, I was unable to retrieve the requested details from the **{scope_name}** registry at this moment.\n\n"
-            "Please try rephrasing your inquiry or specifying a member name or family card number."
-        )
-
-    return {
-        **state,
-        "sql_retry_exhausted": True,
-        "deterministic_reply": reply,
-        "final_answer": reply,
-        "final_response": reply,
-        "error_message": "",
-        "sql_error": None,
-        "route": "handled",
-        "sql_result": [],
-    }
-
-def result_validation_node(state: GraphState) -> GraphState:
-    req_id = state.get("request_id", "N/A")
-    rows = state.get("database_result") or state.get("sql_result") or []
-    plan = state.get("query_plan") or {}
-    q = state.get("original_query") or state.get("question")
-    user_parish = state.get("user_parish")
-    lang = state.get("detected_language", "en")
-
-    from koinonia_assistant.rag.sql_pipeline import validate_and_process_sql_results
-    processed = validate_and_process_sql_results(
-        sql_result=rows,
-        query_plan=plan,
-        question=q,
-        user_parish=user_parish,
-        language=lang
-    )
-
-    print(f"[LANGGRAPH] RESULT VALIDATION NODE | request_id={req_id} | count={processed.get('record_count')}")
-    return {
-        **state,
-        "deterministic_reply": processed.get("reply"),
-        "sql_result": processed.get("data", rows),
-        "authorized_record_count": processed.get("record_count", len(rows)),
-        "suggested_questions": processed.get("suggested_questions", []),
-        "route": "handled",
-    }
-
-RESPONSE_FORMAT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are the KOINONIA Parish Assistant.
-Your task is to present the database query results to the user in a polite, helpful, and beautifully formatted response.
-
-User Question: {question}
-SQL Query Run: {sql}
-Results (JSON):
-{result_json}
-
-Instructions:
-1. If the results are empty, politely inform the user that no records were found matching their search.
-2. If there are results, format them clearly. Use markdown lists or markdown tables to structure the data beautifully.
-3. Be professional and brief. Keep the tone friendly and parish-focused.
-4. Do NOT include technical jargon (like database names, column structures, or table join terms) unless specifically requested. Do NOT print the raw SQL unless requested.
-5. If the query was flagged as UNSUPPORTED, explain politely that you are only able to query sacrament and family registers, and prompt them to rephrase.
-6. IMPORTANT: If the User Question is in a non-English language (e.g., Tamil), you MUST write your final formatted response entirely in that same language.
-7. CRITICAL: NEVER display internal database IDs like 'FAM-...' or 'MEM-...' to the user. Instead, use the Family Card Number ('family_register_number') or member names for display.
-11. ANTI-HALLUCINATION RULE (CRITICAL): When presenting numbers and counts, you MUST use ONLY the exact column names and values returned by the SQL query. NEVER:
-   - Add qualifiers or labels not in the data (e.g. do NOT say 'unique names', 'registered', 'active', 'verified' unless the SQL explicitly used DISTINCT or a filter for that).
-   - Round, estimate, or interpret numbers. Show the exact value from the database.
-   - Combine or subtract counts from different queries. Each number comes from exactly the SQL shown.
-   - Invent subtotals or percentages not present in the result JSON.
-   Example: If the SQL result has {{'Total Baptized Members': 43}}, display exactly '43'. Do NOT say '127 unique members' or any other figure.
-12. CONSISTENCY RULE: The label you show to the user must exactly match what the SQL column alias says. If the column is `Total Baptized Members`, display it as 'Total Baptized Members'. Do not rename it.
-8. PREDICTIVE ANALYSIS & FUTURE PROJECTIONS:
-   - When the user asks to predict future growth, forecast trends, or project numbers based on historical records:
-     a. Display the historical baseline data in a clear markdown table (Year | Historical Count).
-     b. Calculate and state the observed growth rate / trend (e.g. average annual count, yearly net increase/decrease).
-     c. Provide a mathematically projected forecast table for the future years requested (e.g., Year 2027 to 2031 with Projected Count).
-     d. Provide practical pastoral and administrative insights (catechism preparations, community outreach, resource planning).
-10. GRAND TOTALS & SACRAMENT SUMS:
-   - When the user asks for the sum, total count, or breakdown of all sacraments (e.g. '2025 ஆம் ஆண்டில் மறைமாவட்டம் முழுவதும் நடைபெற்ற அனைத்து திருவருட்சாதனங்களின் கூட்டுத்தொகை'):
-     a. Display the counts of each sacrament in a clean table.
-     b. Compute and clearly display the Grand Total / Sum (`கூட்டுத்தொகை`) of all sacraments combined!
-     c. If the question was asked in Tamil, the entire response must be written in Tamil.
-
-9. WHAT-IF & SCENARIO ANALYSIS (Parish Division / Sub-Parish Creation):
-   - When the user asks about splitting a parish or creating a new sub-parish with a specific number of families (e.g., 35 families separated from Yelagiri):
-     a. Present the current parish baseline (Total Families, Total Members).
-     b. Show a structured comparison breakdown: Current Parish vs Remaining Main Parish vs New Sub-Parish.
-     c. Provide constructive pastoral insights on governance, pastoral care, and community impact.
+CRITICAL RULES:
+1. Fix the syntax or column error reported.
+2. Only use columns defined in the table schemas above. Do NOT invent columns.
+3. For tabFamily, DO NOT select `first_name`, `last_name`, or `family_id` (those columns only exist in tabMember).
+4. NEVER return SELECT * or SELECT alias.* or select unhelpful database system columns (such as `name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`, `amended_from`, `_user_tags`, `_comments`, `_assign`, `_liked_by`, `custom`). You MUST explicitly select up to 5 specific, human-readable, helpful columns (like names, key dates, places, status, and IDs).
+5. Return ONLY the corrected SQL query — no explanation, no markdown.
+6. When the query mentions a "BCC" (e.g. 'Lourdu Matha BCC', 'Christ the King BCC'), ALWAYS filter by the `parish_bcc_id` column in `tabFamily`. NEVER use `place_of_birth` or other birth-related columns to filter by BCC name.
+7. If the database error states "Do not mix COUNT(*) with individual columns...", you MUST fix this by removing COUNT(*) entirely from the SELECT clause to return a list of items (since the user asked to "list them"), rather than keeping it.
+8. If the user asked for a chart or graph, ALWAYS return exactly TWO columns: one label column and one numeric count column (e.g., `SELECT gender, COUNT(*) FROM tabBaptism GROUP BY gender`). NEVER use pivoted conditional counts like `COUNT(CASE...)`.
 """),
-    ("human", "Format the response."),
+    ("human", """Failed SQL: {failed_sql}
+Database Error: {error_message}"""),
 ])
 
+def rewrite_sql_node(state: GraphState) -> GraphState:
+    print(f"[rewrite_sql] Rewriting SQL. Retry count: {state.get('retry_count', 0) + 1}...")
+    retry = state.get("retry_count", 0) + 1
+    
+    response = invoke_llm_with_rotation([
+        ("system", SQL_REWRITE_PROMPT.format(
+            question=state["question"],
+            relevant_tables="\n\n".join(state["relevant_tables"]),
+            relevant_fields="\n".join(state["relevant_fields"]),
+            failed_sql=state["generated_sql"],
+            error_message=state["error_message"]
+        ))
+    ])
+    raw_sql = response.content.strip().strip("```sql").strip("```").strip()
+    
+    # Strip any markdown code formatting
+    if raw_sql.startswith("```"):
+        raw_sql = re.sub(r"^```[a-zA-Z]*\n", "", raw_sql)
+        raw_sql = re.sub(r"\n```$", "", raw_sql)
+        
+    return {**state, "generated_sql": raw_sql, "retry_count": retry}
 
-def _smart_fallback_format(raw_results: list, question: str, sql: str, is_tamil: bool) -> str:
-    """
-    Smart fallback renderer used when the LLM formatting call fails.
-    Detects query intent from question + SQL and renders either:
-      - A properly formatted aggregate/statistics summary (for count/total queries)
-      - A markdown table with a record count header (for list queries)
-    instead of the generic "Found N records" string.
-    """
-    import re as _re
-
-    if not raw_results:
-        return ("இந்த நிபந்தனைகளுக்கு பொருந்தும் பதிவுகள் இல்லை." if is_tamil
-                else "No matching records found in the parish registry for your inquiry.")
-
-    q_low = (question or "").lower()
-    sql_low = (sql or "").lower()
-
-    # --- Detect if this is an AGGREGATE / STATS query ---------------------------
-    aggregate_signals = [
-        'count', 'sum(', 'total', 'statistics', 'stats', 'how many', 'breakdown',
-        'group by', 'aggregate', 'sacrament names', 'grand total',
-        'மொத்தம்', 'புள்ளிவிவரம்', 'எத்தனை', 'count(*)', 'count(', 'sum('
-    ]
-    is_aggregate = (
-        any(s in q_low for s in aggregate_signals) or
-        any(s in sql_low for s in ['count(', 'sum(', 'group by'])
-    )
-
-    lines = []
-
-    if is_aggregate and isinstance(raw_results, list) and raw_results:
-        # ── Aggregate: render a clean summary table ───────────────────────────
-        if is_tamil:
-            lines.append("### 📊 உங்கள் பங்கின் புள்ளிவிவரங்கள்\n")
-        else:
-            lines.append("### 📊 Parish Statistics\n")
-
-        first = raw_results[0]
-        if isinstance(first, dict):
-            keys = list(first.keys())
-
-            # Single-row aggregate (e.g. one row with total_members, total_families)
-            if len(raw_results) == 1:
-                for k, v in first.items():
-                    label = k.replace('_', ' ').title()
-                    lines.append(f"- **{label}**: {v}")
-            else:
-                # Multi-row aggregate (e.g. sacrament breakdown)
-                # Render as markdown table
-                lines.append("| " + " | ".join(k.replace('_', ' ').title() for k in keys) + " |")
-                lines.append("| " + " | ".join(["---"] * len(keys)) + " |")
-                grand_total = 0
-                total_col = None
-                for k in keys:
-                    if any(t in k.lower() for t in ['count', 'total', 'sum']):
-                        total_col = k
-                        break
-                for r in raw_results:
-                    lines.append("| " + " | ".join(str(r.get(k, '')) for k in keys) + " |")
-                    if total_col:
-                        try:
-                            grand_total += int(r.get(total_col, 0) or 0)
-                        except (ValueError, TypeError):
-                            pass
-                if total_col and grand_total:
-                    if is_tamil:
-                        lines.append(f"\n**மொத்தம்: {grand_total}**")
-                    else:
-                        lines.append(f"\n**Grand Total: {grand_total}**")
-
-    else:
-        # ── List/Record query: render markdown table with count header ─────────
-        n = len(raw_results)
-        if is_tamil:
-            lines.append(f"உங்கள் வினவலுக்கு **{n}** பதிவுகள் கண்டறியப்பட்டன:\n")
-        else:
-            lines.append(f"Found **{n}** record{'s' if n != 1 else ''} matching your query:\n")
-
-        if isinstance(raw_results, list) and raw_results and isinstance(raw_results[0], dict):
-            # Strip internal ID columns for display
-            skip_cols = set()
-            for r in raw_results[:1]:
-                for k in r:
-                    if _re.match(r'^(name|id)$', k, _re.IGNORECASE):
-                        val = str(r.get(k, ''))
-                        if _re.match(r'^(FAM|MEM|fam|mem)-', val):
-                            skip_cols.add(k)
-
-            headers = [k for k in raw_results[0].keys() if k not in skip_cols]
-            if headers:
-                lines.append("| " + " | ".join(h.replace('_', ' ').title() for h in headers) + " |")
-                lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
-                for r in raw_results[:20]:
-                    lines.append("| " + " | ".join(str(r.get(h, '') or '') for h in headers) + " |")
-                if n > 20:
-                    if is_tamil:
-                        lines.append(f"\n_மேலும் {n - 20} பதிவுகள் உள்ளன. Excel/PDF-ஐ பயன்படுத்தி அனைத்தையும் பதிவிறக்கவும்._")
-                    else:
-                        lines.append(f"\n_...and {n - 20} more records. Use Excel/PDF to download all._")
-
-    return "\n".join(lines)
-
+def execute_sql_node(state: GraphState) -> GraphState:
+    print("[execute_sql] Running SQL against MariaDB...")
+    sql = state["generated_sql"]
+    
+    if sql in ["UNSUPPORTED", "UNAUTHORIZED_DIOCESE", "UNAUTHORIZED_PARISH"]:
+        return {**state, "sql_result": None, "error_message": ""}
+        
+    import frappe
+    try:
+        results = frappe.db.sql(sql, as_dict=True)
+        print(f"[execute_sql] Query returned {len(results)} rows.")
+        return {**state, "sql_result": results, "error_message": ""}
+    except Exception as e:
+        print(f"[execute_sql] Execution failed: {e}")
+        return {**state, "error_message": f"Database execution error: {str(e)}"}
 
 def format_response_node(state: GraphState) -> GraphState:
-    print("[format_response] Formatting final LLM response...")
-    orig_q = state.get("original_query") or state["question"]
-    lang = state.get("detected_language") or ("ta" if any('\u0B80' <= c <= '\u0BFF' for c in orig_q) else "en")
-    is_ta = lang == "ta"
-    auth_ctx = state.get("authorization_context") or {}
-    scope_type = auth_ctx.get("scope_type", "PARISH" if state.get("user_parish") else "DIOCESE")
-    scope_name = auth_ctx.get("scope_name") or state.get("user_parish") or "Authorized Scope"
+    print("[format_response] Formatting final response locally...")
+    
+    if state.get("error_message") == "Unauthorized parish access" or state.get("generated_sql") == "UNAUTHORIZED_PARISH":
+        user_role = state.get("user_role") or "User"
+        user_parish = state.get("user_parish") or "your assigned parish"
+        user_vicariate = state.get("user_vicariate") or "your vicariate"
+        user_parishes = state.get("user_parishes") or []
+        
+        if user_role == "Parish Priest":
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"As the **Parish Priest** of **{user_parish}**, your jurisdiction and access are strictly limited to records within **{user_parish}**.\n\n"
+                f"You do not have permission to view or query member and sacrament registries belonging to other parishes."
+            )
+        else:
+            p_str = ", ".join([f"**{p}**" for p in user_parishes]) if user_parishes else f"**{user_parish}**"
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"As the **{user_role}** for **{user_vicariate}**, your administration and registry access are strictly limited to your controlled parishes: {p_str}.\n\n"
+                f"You do not have permission to view or query registries belonging to parishes outside your jurisdiction."
+            )
+        return {**state, "final_answer": ans}
 
-    if state.get("sql_retry_exhausted"):
-        reply = state.get("deterministic_reply") or state.get("final_answer")
-        return {**state, "final_answer": reply, "final_response": reply}
+    if state.get("error_message") == "Unauthorized diocese access" or state.get("generated_sql") == "UNAUTHORIZED_DIOCESE":
+        user_role = state.get("user_role", "Parish Priest")
+        user_diocese = state.get("user_diocese") or "your assigned diocese"
+        user_parish = state.get("user_parish") or "your assigned parish"
+        user_vicariate = state.get("user_vicariate") or "your assigned vicariate"
+        foreign_p = state.get("requested_foreign_parish")
+        foreign_d = state.get("requested_foreign_diocese")
+        
+        p_prefix = f"• **{foreign_p}** belongs to the **{foreign_d} Diocese**.\n" if (foreign_p and foreign_d) else (f"• The requested registry belongs to the **{foreign_d} Diocese**.\n" if foreign_d else "")
+        
+        if user_role == "Bishop":
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"{p_prefix}"
+                f"• As the **Bishop** of **{user_diocese} Diocese**, your jurisdiction and access are strictly limited to records within **{user_diocese} Diocese**.\n\n"
+                f"You do not have permission to view or query registries belonging to other dioceses."
+            )
+        elif user_role == "Parish Priest":
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"{p_prefix}"
+                f"• As a **Parish Priest** for **{user_parish}**, your access is restricted to records within your assigned parish. "
+                f"You do not have permission to view data across all parishes in the diocese or other dioceses.\n\n"
+                f"If you require diocese-wide reports or statistics, please request them from the Bishop's Office."
+            )
+        elif user_role in ["Vicar Forane", "Vicar General"]:
+            user_parishes = state.get("user_parishes") or []
+            p_str = ", ".join([f"**{p}**" for p in user_parishes]) if user_parishes else "your assigned parishes"
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"{p_prefix}"
+                f"• As the **{user_role}** for **{user_vicariate}**, your access is restricted to your assigned parishes ({p_str}) within **{user_diocese} Diocese**.\n\n"
+                f"You do not have permission to view records for the entire diocese or other dioceses."
+            )
+        else:
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"{p_prefix}"
+                f"• Your account role (**{user_role}**) is restricted to local parish records. "
+                f"You do not have permission to view data across other parishes or dioceses."
+            )
+        return {**state, "final_answer": ans}
 
     if state.get("error_message") == "Unsupported query" or state.get("generated_sql") == "UNSUPPORTED":
-        if is_ta:
-            ans = (
-                "மன்னிக்கவும், என்னால் திருவருட்சாதன பதிவேடுகள் (திருமுழுக்கு, முதல் நற்கருணை, உறுதிப்பூசுதல், திருமணம், இறப்பு) "
-                "மற்றும் பங்கு குடும்ப/உறுப்பினர் பதிவேடுகளை மட்டுமே தேட முடியும். "
-                "தயவுசெய்து இந்த பதிவேடுகள் தொடர்பான கேள்வியைக் கேளுங்கள், நான் உங்களுக்காக தேடித் தருகிறேன்!"
-            )
-        else:
-            ans = (
-                "I'm sorry, but I can only search sacrament registers (Baptism, First Holy Communion, Confirmation, Marriage, and Death) "
-                "and parish Family/Member registers. Please ask a question related to these registries, and I'll be happy to search for you!"
-            )
+        ans = (
+            "I'm sorry, but I can only search sacrament registers (Baptism, Communion, Confirmation, Marriage, Anointing of the Sick, and Death) and parish Family/Member registers. "
+            "Please ask a question related to these registries, and I'll be happy to search for you! 😊"
+        )
         return {**state, "final_answer": ans}
-
+        
     if state.get("error_message"):
         ans = (
-            "I encountered an issue searching the parish registries:\n\n"
-            f"`{state['error_message']}`\n\n"
-            "Please try selecting one of the suggested search options below."
+            "🙏 I couldn't complete this query right now. "
+            "Please try rephrasing your question or ask again in a moment! 😊"
         )
         return {**state, "final_answer": ans}
-
-    req_id = state.get("request_id", "N/A")
-    c_intent = state.get("classified_intent", "GENERAL_DATABASE_QUERY")
-    det_reply = state.get("deterministic_reply")
-
-    print(f"[LANGGRAPH] LLM / FORMATTER NODE | request_id={req_id} | intent={c_intent} | lang={lang} | scope={scope_name}")
-
-    if det_reply:
-        # For analytical, historical, trend, forecast, and comparison queries, invoke LLM to append grounded executive interpretation
-        if c_intent in ("HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS", "TREND_ANALYSIS", "FORECAST", "COMPARISON"):
-            meta = state.get("analysis_metadata") or {}
-            datasets = meta.get("datasets") or {}
-            summary_payload = {}
-            for k, ds in datasets.items():
-                summary_payload[ds.get("ta_label" if is_ta else "metric_label", k)] = {
-                    "scope_type": ds.get("scope_type"),
-                    "scope_name": ds.get("scope_name"),
-                    "authorized_record_count": ds.get("authorized_record_count"),
-                    "historical_period": f"{ds.get('start_year')}-{ds.get('end_year')}",
-                    "statistics": {
-                        sk: sv for sk, sv in (ds.get("stats") or {}).items() if sk != "yoy_rows"
-                    },
-                    "forecast": {
-                        "method": (ds.get("forecast") or {}).get("method"),
-                        "forecast_period": (ds.get("forecast") or {}).get("forecast_period"),
-                        "first_3_projections": ((ds.get("forecast") or {}).get("forecast_rows") or [])[:3],
-                        "last_projection": ((ds.get("forecast") or {}).get("forecast_rows") or [-1])[-1] if ((ds.get("forecast") or {}).get("forecast_rows")) else None,
-                    } if ds.get("forecast") else None,
-                }
-            try:
-                if is_ta:
-                    analytical_prompt = ChatPromptTemplate.from_messages([
-                        ("system", """You are the Pastoral & Statistical Analyst for the Koinonia Assistant.
-STRICT TAMIL & SECURITY RULES (Sections 36, 37, 42, 68):
-1. Understand the user's Tamil query directly. Preserve Tamil terminology.
-2. Do NOT transliterate Tamil into Tanglish.
-3. Answer in natural, idiomatic Catholic Tamil using ONLY the configured Koinonia canonical terminology:
-   - Baptism -> திருமுழுக்கு
-   - First Holy Communion -> முதல் நற்கருணை
-   - Confirmation -> உறுதிப்பூசுதல்
-   - Marriage -> திருமணம்
-   - Parish -> பங்கு ({scope_name})
-4. NEVER invent or alter numbers. Cite ONLY the verified statistics for {scope_name} provided in the JSON.
-5. Keep your commentary concise (5-8 lines) under two short Tamil bullets:
-   - **பதிவு செய்யப்பட்ட தரவுகளின் சுருக்கம் (Observed Data Findings)**
-   - **புள்ளிவிவர மற்றும் மேய்ப்புப் பணி விளக்கம் (Statistical & Pastoral Interpretation)**"""),
-                        ("human", "Original Tamil Question: {question}\nAuthorized Scope: {scope_name}\nIntent: {intent}\nVerified Calculations JSON:\n{stats_json}")
-                    ])
-                    llm_resp = llm.invoke(analytical_prompt.format_messages(
-                        question=orig_q,
-                        scope_name=scope_name,
-                        intent=c_intent,
-                        stats_json=json.dumps(summary_payload, default=str, ensure_ascii=False, indent=2)
-                    ))
-                    commentary = llm_resp.content.strip()
-                    if commentary:
-                        det_reply = f"{det_reply}\n\n#### 💡 புள்ளிவிவர மற்றும் மேய்ப்புப் பணி விளக்கம்\n{commentary}"
-                else:
-                    analytical_prompt = ChatPromptTemplate.from_messages([
-                        ("system", """You are the Pastoral & Statistical Analyst for the Koinonia Assistant.
-You are given VERIFIED statistical & forecasting results computed strictly within the user's authorized scope ({scope_name}).
-STRICT RULES (Sections 68, 69, 72):
-1. NEVER invent, alter, or guess any numbers. Cite ONLY the exact statistics and projected ranges provided in the JSON for {scope_name}.
-2. NEVER refer to 'Diocesan Registry Benchmark' if the scope is a Parish ({scope_name}). Always state that the analysis is strictly scoped to {scope_name}.
-3. Explicitly separate your explanation into two short bullet sections:
-   - **Observed Data Findings ({scope_name}):** Summarize the exact historical counts, peak/low years, percentage change, and OLS regression slope.
-   - **Statistical & Pastoral Interpretation:** Explain what the trend direction, volatility, and (if present) projected forecast ranges mean in practice.
-4. Keep the commentary concise (6-10 lines maximum)."""),
-                        ("human", "User Question: {question}\nAuthorized Scope: {scope_name}\nIntent: {intent}\nVerified Calculations JSON:\n{stats_json}")
-                    ])
-                    llm_resp = llm.invoke(analytical_prompt.format_messages(
-                        question=orig_q,
-                        scope_name=scope_name,
-                        intent=c_intent,
-                        stats_json=json.dumps(summary_payload, default=str, indent=2)
-                    ))
-                    commentary = llm_resp.content.strip()
-                    if commentary:
-                        det_reply = f"{det_reply}\n\n#### 💡 Executive Statistical & Pastoral Interpretation ({scope_name})\n{commentary}"
-            except Exception as llm_err:
-                print(f"[LANGGRAPH] LLM analytical commentary fallback: {llm_err}")
-
-        # Layer 8 Response Scope Validation (Section 72)
-        if scope_type == "PARISH" and "Diocesan Registry Benchmark" in det_reply:
-            det_reply = det_reply.replace("Diocesan Registry Benchmark", scope_name)
-
-        print(f"[LANGGRAPH] RESPONSE NODE | request_id={req_id} | intent={c_intent} | status=VERIFIED_COMPLETE")
-        return {**state, "final_answer": det_reply}
 
     raw_results = state["sql_result"]
-    if not raw_results or len(raw_results) == 0:
-        if is_ta:
-            ans = f"**{scope_name}** பதிவேட்டில் இந்த நிபந்தனைகளுக்குப் பொருந்தும் பதிவுகள் எதுவும் இல்லை."
-        else:
-            ans = f"No matching records found in the **{scope_name}** registry for your inquiry."
-        return {**state, "final_answer": ans}
-
-    if isinstance(raw_results, list) and len(raw_results) > 20:
-        raw_results = raw_results[:20]
-    result_json = json.dumps(raw_results, default=str, ensure_ascii=False, indent=1)
-
-    try:
-        response = llm.invoke(RESPONSE_FORMAT_PROMPT.format_messages(
-            question=orig_q,
-            sql=state["generated_sql"],
-            result_json=result_json
-        ))
-        raw_ans = response.content.strip()
-    except Exception as e:
-        print(f"[format_response] LLM formatting failed: {e}. Using smart fallback.")
-        raw_ans = _smart_fallback_format(raw_results, orig_q, state.get('generated_sql', ''), is_ta)
-
-    clean_ans = re.sub(r'\s*\(?\s*ID\s*:\s*(?:FAM|MEM|fam|mem)-[A-Za-z0-9\-]+\)?', '', raw_ans, flags=re.IGNORECASE)
-    clean_ans = re.sub(r'\s*\(?\s*(?:Family|Member)\s*ID\s*:\s*[A-Za-z0-9\-]+\)?', '', clean_ans, flags=re.IGNORECASE)
-    clean_ans = re.sub(r'\b(?:FAM|MEM)-[A-Za-z0-9\-]+\b', '', clean_ans)
-    clean_ans = re.sub(r'\n\s*[-*]\s*\*\*(?:Family|Member) ID:\*\*.*', '', clean_ans)
-    clean_ans = re.sub(r'\n\s*[-*]\s*(?:Family|Member) ID:.*', '', clean_ans)
-
-    print(f"[LANGGRAPH] RESPONSE NODE | request_id={req_id} | intent={c_intent} | status=SQL_FORMAT_COMPLETE")
-    return {**state, "final_answer": clean_ans.strip()}
-
-
-def database_lookup_node(state: GraphState) -> GraphState:
-    """
-    LangGraph node that executes verified, authorization-constrained database lookups for:
-    - LIST (including qualified sacrament member lists like 'List any 10 members who got 3 Sacrements')
-    - COUNT (Strictly scoped to the user's authorized parish when scope_type == 'PARISH')
-    - MEMBER_SEARCH / FAMILY_SEARCH / SACRAMENT_SEARCH (including Family Card & Tamil names)
-    """
-    req_id = state.get("request_id", "N/A")
-    question = (state.get("question") or state.get("original_query") or "").strip()
-    c_intent = state.get("classified_intent", "LIST")
-    intent_info = state.get("intent_info") or {}
-    auth_ctx = state.get("authorization_context") or {}
-    scope_type = auth_ctx.get("scope_type", "PARISH" if state.get("user_parish") else "DIOCESE")
-    scope_name = auth_ctx.get("scope_name") or state.get("user_parish") or "Diocesan Registry"
-    # tabMember and tabFamily store parish_id as the human parish name ('Yelagiri Parish')
-    user_parish = (scope_name if scope_type == "PARISH" else None) or state.get("user_parish")
-    user_diocese = auth_ctx.get("diocese_id") or state.get("user_diocese")
-    is_ta = state.get("detected_language") == "ta"
-
-    print(f"[LANGGRAPH] DATABASE NODE | request_id={req_id} | intent={c_intent} | scope_type={scope_type} | scope_name={scope_name}")
-
-    # 0. Dedicated Statistical & Aggregation Execution (STATISTICS QUESTIONS MUST BYPASS PERSON RESOLUTION)
-    stats_dims = intent_info.get("statistical_dimensions")
-    if not stats_dims:
-        from koinonia_assistant.rag.name_search import detect_statistical_query
-        stats_dims = detect_statistical_query(question)
-
-    if stats_dims or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS"):
-        print(f"[LANGGRAPH] DATABASE NODE | Statistical query diverted to SQL Pipeline for execution visibility")
-        return {
-            **state,
-            "retrieval_status": "NO_RESULT",
-            "retrieval_failed": True,
-            "sql_fallback_required": True,
-            "route": "fallback",
-        }
-
-    # 1. Family Card / Register Number Lookup (Strict Separation)
-    reg_match = re.search(
-        r'(?:with\s+|having\s+)?(?:family\s*register(?:\s*number|\s*no)?|register\s*(?:number|no)?|reg\s*(?:number|no)?|reg|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\u0baa\u0bcd\s*\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd|\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd)[:\s]+([A-Z]{2,5}[/\-]\d{1,5})\b',
-        question,
-        re.IGNORECASE
-    ) or re.search(
-        r'\b([A-Z]{2,5}[/\-]\d{1,5})\s*(?:family\s*register|register\s*(?:number|no)?|reg\s*no|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\u0baa\u0bcd\s*\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd|\u0baa\u0ba4\u0bbf\u0bb5\u0bc1\s*\u0b8e\u0ba3\u0bcd)',
-        question,
-        re.IGNORECASE
-    )
-
-    card_match = re.search(
-        r'(?:with\s+|having\s+)?(?:family\s*card(?:\s*number|\s*no)?|card(?:\s*number|\s*no)?|card|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\s*\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?|\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?)[:\s]+([A-Z]{2,5}[/\-]\d{1,5})\b',
-        question,
-        re.IGNORECASE
-    ) or re.search(
-        r'\b([A-Z]{2,5}[/\-]\d{1,5})\s*(?:family\s*card|card(?:\s*no|\s*number)?|\u0b95\u0bc1\u0b9f\u0bc1\u0bae\u0bcd\u0baa\s*\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?|\u0b85\u0b9f\u0bcd\u0b9f\u0bc8(?:\s*\u0b8e\u0ba3\u0bcd)?)',
-        question,
-        re.IGNORECASE
-    )
-
-    generic_code_match = re.search(r"\b([A-Z]{2,5}[/\-]\d{1,5})\b", question, re.IGNORECASE)
-    has_person_in_query = bool(classify_query_intent(question).get("person_name"))
-    matched_id = reg_match or card_match or generic_code_match
-
-    if matched_id and not has_person_in_query:
-        ensure_frappe_connected()
+    
+    if not raw_results:
+        # Check if the user was querying a parish that exists in another diocese
         import frappe
-        code_val = matched_id.group(1).upper()
-
-        if reg_match:
-            where_f = ["UPPER(family_register_number) = %s"]
-            params_f: List[Any] = [code_val]
-            desc_en = f"family register `{code_val}`"
-            desc_ta = f"`{code_val}` என்ற குடும்பப் பதிவு எண்"
-        elif card_match:
-            where_f = ["UPPER(family_card_number) = %s"]
-            params_f: List[Any] = [code_val]
-            desc_en = f"family card `{code_val}`"
-            desc_ta = f"`{code_val}` என்ற குடும்ப அட்டை"
-        else:
-            where_f = ["(UPPER(family_card_number) = %s OR UPPER(family_register_number) = %s)"]
-            params_f: List[Any] = [code_val, code_val]
-            desc_en = f"`{code_val}`"
-            desc_ta = f"`{code_val}` என்ற குடும்ப எண்"
-
-        if scope_type == "PARISH" and user_parish:
-            where_f.append("(parish_id = %s OR parish_id LIKE %s)")
-            params_f.extend([user_parish, f"%{user_parish}%"])
-
-        fam_rows = frappe.db.sql(
-            f"SELECT name, parish_id, family_card_number, family_register_number, reference FROM `tabFamily` WHERE {' AND '.join(where_f)} LIMIT 1",
-            tuple(params_f),
-            as_dict=True,
-        )
-        if not fam_rows:
-            print(f"[LANGGRAPH] DATABASE NODE | Family code '{code_val}' not found in primary retrieval -> SQL Fallback")
-            return {
-                **state,
-                "retrieval_status": "NO_RESULT",
-                "retrieval_failed": True,
-                "sql_fallback_required": True,
-                "route": "fallback",
-            }
-        fid = fam_rows[0]["name"]
-        bundle = fetch_full_family_bundle(fid, user_parish)
-        if bundle.get("family"):
-            scope = determine_response_scope(question)
-            head_mem = bundle.get("members", [{}])[0] if bundle.get("members") else {}
-            reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
-            return {
-                **state,
-                "retrieval_status": "SUCCESS",
-                "retrieval_failed": False,
-                "sql_fallback_required": False,
-                "route": "success",
-                "deterministic_reply": reply,
-                "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}' AND parish_id = '{user_parish or ''}'",
-                "sql_result": bundle.get("members", []),
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(bundle.get("members", [])),
-                "suggested_questions": suggestions,
-            }
-
-    # 1. Qualified Member Sacrament List (e.g. "List any 10 members who got 3 Sacrements")
-    if c_intent == "LIST" and intent_info.get("sub_intent") == "QUALIFIED_MEMBER_SACRAMENT_LIST":
-        ensure_frappe_connected()
-        from koinonia_assistant.rag.analytics_engine import execute_qualified_member_sacrament_list
-        res = execute_qualified_member_sacrament_list(
-            sacrament_count_filter=intent_info.get("sacrament_count_filter"),
-            metrics=intent_info.get("metrics") or [],
-            limit=intent_info.get("limit", 10),
-            user_parish=user_parish,
-            user_diocese=user_diocese,
-            auth_ctx=auth_ctx,
-        )
-        data = res.get("data", [])
-        if data:
-            return {
-                **state,
-                "retrieval_status": "SUCCESS",
-                "retrieval_failed": False,
-                "sql_fallback_required": False,
-                "route": "success",
-                "deterministic_reply": res["reply"],
-                "generated_sql": res["generated_sql"],
-                "sql_result": data,
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": res["records_retrieved"],
-                "suggested_questions": [
-                    "List any 10 members who got 2 Sacraments",
-                    f"Show baptism statistics for the last 10 years in {scope_name}",
-                    "Compare baptism, confirmation and marriage over the last 10 years",
-                ],
-            }
-        else:
-            return {
-                **state,
-                "retrieval_status": "NO_RESULT",
-                "retrieval_failed": True,
-                "sql_fallback_required": True,
-                "route": "fallback",
-            }
-
-    # 2. Standard LIST_MEMBERS / LIST_FAMILIES
-    if c_intent == "LIST":
-        sub = intent_info.get("sub_intent")
-        req_count = intent_info.get("limit", 10)
-        name_filter = intent_info.get("filter")
-        if sub == "LIST_FAMILIES":
-            res = handle_list_families(requested_count=req_count, user_parish=user_parish, user_diocese=user_diocese)
-        else:
-            res = handle_list_members(requested_count=req_count, name_filter=name_filter, user_parish=user_parish, user_diocese=user_diocese)
-        data = res.get("data", [])
-        if data:
-            return {
-                **state,
-                "retrieval_status": "SUCCESS",
-                "retrieval_failed": False,
-                "sql_fallback_required": False,
-                "route": "success",
-                "deterministic_reply": res["reply"],
-                "generated_sql": res.get("generated_sql", ""),
-                "sql_result": data,
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(data),
-                "suggested_questions": res.get("suggested_questions", []),
-            }
-        else:
-            return {
-                **state,
-                "retrieval_status": "NO_RESULT",
-                "retrieval_failed": True,
-                "sql_fallback_required": True,
-                "route": "fallback",
-            }
-
-    # 3. COUNT queries (Divert to SQL Pipeline for execution visibility)
-    if c_intent == "COUNT":
-        return {
-            **state,
-            "retrieval_status": "NO_RESULT",
-            "retrieval_failed": True,
-            "sql_fallback_required": True,
-            "route": "fallback",
-        }
-
-
-
-    # 5. Explicit ID or 3-Level Member / Family / Sacrament Resolution
-    fam_id_match = re.search(r'\b(?:Family\s*ID|Family)[:\s]+([0-9]+)\b', question, re.IGNORECASE) or re.search(r'\bFAM-([0-9A-Z\-]+)\b', question, re.IGNORECASE)
-    mem_id_match = re.search(r'\b(?:Member\s*ID|Member)[:\s]+([0-9]+)\b', question, re.IGNORECASE) or re.search(r'\bMEM-([0-9A-Z\-]+)\b', question, re.IGNORECASE)
-
-    if (fam_id_match or mem_id_match) and not has_person_in_query:
-        intent = detect_query_intent(question)
-        if mem_id_match and (intent in ["sacraments", "sacrament_details"] or not fam_id_match):
-            mid = mem_id_match.group(1)
-            sac_bundle = fetch_member_sacrament_bundle(mid, user_parish)
-            if sac_bundle.get("member"):
-                m = sac_bundle.get("member")
-                m["member_id"] = m.get("name")
-                m["full_name"] = sac_bundle.get("full_name") or f"{m.get('first_name', '')} {m.get('last_name', '')}".strip()
-                fam_bundle = fetch_full_family_bundle(m.get("family_id"), user_parish)
-                m["family_register_number"] = fam_bundle.get("family", {}).get("family_register_number") or m.get("family_id")
-                scope = determine_response_scope(question)
-                reply, suggestions = render_scoped_response(scope, m, sac_bundle, fam_bundle, language="ta" if is_ta else "en")
-                data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS'] else [m]
-                return {
-                    **state,
-                    "retrieval_status": "SUCCESS",
-                    "retrieval_failed": False,
-                    "sql_fallback_required": False,
-                    "route": "success",
-                    "deterministic_reply": reply,
-                    "generated_sql": f"SELECT * FROM `tabMember` WHERE name = '{mid}'",
-                    "sql_result": data_payload,
-                    "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                    "authorized_record_count": len(data_payload),
-                    "suggested_questions": suggestions,
-                }
+        foreign_p = None
+        foreign_d = None
+        user_dio = (state.get("user_diocese") or "").strip()
+        user_role_val = state.get("user_role") or "Bishop"
+        q_text = (state.get("query_text") or "").lower()
+        if frappe.db.table_exists("Parish"):
+            all_parishes = frappe.db.sql("SELECT name, diocese_id FROM tabParish", as_dict=True)
+            for p in all_parishes:
+                p_name = p.get("name") or ""
+                p_dio = p.get("diocese_id") or ""
+                short_p = p_name.replace("Parish", "").replace("Church", "").replace("Cathedral", "").replace("Shrine", "").strip()
+                if short_p and len(short_p) > 3 and re.search(r'\b' + re.escape(short_p.lower()) + r'\b', q_text):
+                    if user_dio and p_dio and p_dio.lower() != user_dio.lower():
+                        foreign_p = p_name
+                        foreign_d = p_dio
+                        break
+        
+        if foreign_p and foreign_d:
+            ans = (
+                f"🔒 **Access Restricted**\n\n"
+                f"• **{foreign_p}** belongs to the **{foreign_d} Diocese**.\n"
+                f"• As the **{user_role_val}** of **{user_dio} Diocese**, your jurisdiction and access are strictly limited to records within **{user_dio} Diocese**.\n\n"
+                f"You do not have permission to view or query registries belonging to other dioceses."
+            )
+            return {**state, "final_answer": ans}
+            
+        q_orig = state.get("question") or ""
+        is_tam = bool(re.search(r'[\u0B80-\u0BFF]', q_orig)) or any(kw in q_orig.lower() for kw in ["tamil", "தமிழில்", "தமிழ்"])
+        
+        gen_sql = state.get("generated_sql") or ""
+        
+        # Check if query was searching for a specific person's name
+        name_search_match = re.search(r"(?:first_name|last_name|bridegroom_name|bride_name|bridegroom_last_name|bride_last_name|full_name|mrg_minister|mrg_register_ref)\s+LIKE\s+'%([^%']+)%'", gen_sql, re.IGNORECASE)
+        if name_search_match:
+            searched_name = name_search_match.group(1).strip()
+            table_match = re.search(r'FROM\s+`?(tab(?:Anointing Of Sick|[A-Za-z0-9_]+))`?', gen_sql, re.IGNORECASE)
+            tname = table_match.group(1).strip('`') if table_match else "tabMember"
+            reg_name = {
+                "tabMarriage": "திருமணப் பதிவேட்டில்",
+                "tabBaptism": "ஞானஸ்நானப் பதிவேட்டில்",
+                "tabCommunion": "புது நன்மைப் பதிவேட்டில்",
+                "tabConfirmation": "உறுதிப்பூசுதல் பதிவேட்டில்",
+                "tabDeath": "மரணப் பதிவேட்டில்",
+                "tabMember": "உறுப்பினர் பட்டியலில்"
+            }.get(tname, "பதிவேட்டில்")
+            
+            if is_tam:
+                ans = f"{reg_name} **{searched_name}** என்ற பெயரில் எந்தப் பதிவும் கண்டறியப்படவில்லை."
             else:
-                return {
-                    **state,
-                    "retrieval_status": "NO_RESULT",
-                    "retrieval_failed": True,
-                    "sql_fallback_required": True,
-                    "route": "fallback",
-                }
-        elif fam_id_match:
-            fid = fam_id_match.group(1)
-            bundle = fetch_full_family_bundle(fid, user_parish)
-            if bundle.get("family"):
-                scope = determine_response_scope(question)
-                head_mem = bundle.get("members", [{}])[0] if bundle.get("members") else {}
-                reply, suggestions = render_scoped_response(scope, head_mem, None, bundle, language="ta" if is_ta else "en")
-                return {
-                    **state,
-                    "retrieval_status": "SUCCESS",
-                    "retrieval_failed": False,
-                    "sql_fallback_required": False,
-                    "route": "success",
-                    "deterministic_reply": reply,
-                    "generated_sql": f"SELECT * FROM `tabFamily` WHERE name = '{fid}'",
-                    "sql_result": bundle.get("members", []),
-                    "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                    "authorized_record_count": len(bundle.get("members", [])),
-                    "suggested_questions": suggestions,
-                }
+                ans = f"No records found for **{searched_name}** in the registry."
+            return {**state, "final_answer": ans}
+
+        # Check if query searched for 2026 / current year on a registry with prior records
+        table_match = re.search(r'FROM\s+`?(tab(?:Anointing Of Sick|[A-Za-z0-9_]+))`?', gen_sql, re.IGNORECASE)
+        latest_yr = None
+        if table_match and any(k in gen_sql for k in ["YEAR(CURDATE())", "2026", "YEAR("]):
+            tname = table_match.group(1).strip().strip('`')
+            doc_type = tname.replace("tab", "", 1) if tname.startswith("tab") else tname
+            if frappe.db.table_exists(doc_type):
+                cols = frappe.db.get_table_columns(doc_type)
+                date_cols = [c for c in ["death_date", "bapt_date", "mrg_date", "fhc_date", "cnf_date", "anointing_date"] if c in cols]
+                if date_cols:
+                    dcol = date_cols[0]
+                    dio_val = (state.get("user_diocese") or "").strip()
+                    dio_cond = f"WHERE diocese_id = '{dio_val}' AND {dcol} IS NOT NULL" if dio_val and "diocese_id" in cols else f"WHERE {dcol} IS NOT NULL"
+                    res_max = frappe.db.sql(f"SELECT MAX(YEAR({dcol})) AS max_yr, COUNT(*) AS count_max FROM `{tname}` {dio_cond}", as_dict=True)
+                    if res_max and res_max[0].get("max_yr"):
+                        latest_yr = res_max[0]["max_yr"]
+        
+        if latest_yr and latest_yr < 2026:
+            if is_tam:
+                ans = f"நடப்பு 2026-ஆம் ஆண்டிற்கான பதிவுகள் எதுவும் பதிவேற்றப்படவில்லை. மிக சமீபத்திய பதிவுகள் **{latest_yr}**-ஆம் ஆண்டிற்குரியவை. நீங்கள் **{latest_yr}**-ஆம் ஆண்டின் பதிவுகளைப் பார்க்க விரும்புகிறீர்களா?"
             else:
-                return {
-                    **state,
-                    "retrieval_status": "NO_RESULT",
-                    "retrieval_failed": True,
-                    "sql_fallback_required": True,
-                    "route": "fallback",
-                }
+                ans = f"No records have been recorded for 2026 yet. The latest available records in the registry are from **{latest_yr}**. Would you like to view records for {latest_yr}?"
+            suggested_qs = [
+                f"{latest_yr}-ல் எத்தனை நபர்கள் இறந்தார்கள்?",
+                f"Show {latest_yr} records",
+                f"{latest_yr} பதிவுகள்"
+            ]
+            return {**state, "final_answer": ans, "suggested_questions": suggested_qs}
+            
+        ans = "உங்கள் தேடலுக்குரிய பதிவுகள் எதுவும் கிடைக்கவில்லை." if is_tam else "No records were found matching your search." 
+    else:
+        # Keep all results for full interactive table pagination in UI
+            
+        if isinstance(raw_results, list) and len(raw_results) > 0 and isinstance(raw_results[0], dict):
+            # Check for relationship inquiry between two persons
+            is_rel_query = (
+                "rel_relationship_id" in raw_results[0] or 
+                "rel1" in raw_results[0] or
+                "relationship1" in raw_results[0] or
+                "person1_role" in raw_results[0] or
+                "person1_relationship" in raw_results[0] or
+                "person2_relationship" in raw_results[0] or
+                "rel_first_name" in raw_results[0] or
+                "first_name2" in raw_results[0] or
+                "person2_first" in raw_results[0] or
+                ("relationship_id" in raw_results[0] and len(raw_results[0]) <= 8 and any(k in raw_results[0] for k in ["parish1", "person1", "rel2", "rel_parish_id", "first_name1"]))
+            )
+            if is_rel_query:
+                row = raw_results[0]
+                p1_parts = [row.get("person1_fullname") or row.get("first_name") or row.get("person1_first") or row.get("first_name1") or row.get("person1"), row.get("middle_name") or row.get("middle_name1") if not row.get("person1_fullname") else None, row.get("last_name") or row.get("person1_last") or row.get("last_name1") if not row.get("person1_fullname") else None]
+                p1 = row.get("person1_fullname") or " ".join([str(p).strip() for p in p1_parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip()
+                r1 = row.get("relationship_id") or row.get("person1_role") or row.get("person1_relationship") or row.get("relationship1") or row.get("rel1") or "Member"
+                parish1 = row.get("parish_id") or row.get("person1_parish") or row.get("parish_name") or row.get("parish1") or ""
+                
+                p2_parts = [row.get("person2_fullname") or row.get("rel_first_name") or row.get("person2_first") or row.get("first_name2") or row.get("person2"), row.get("rel_middle_name") or row.get("middle_name2") if not row.get("person2_fullname") else None, row.get("rel_last_name") or row.get("person2_last") or row.get("last_name2") if not row.get("person2_fullname") else None]
+                p2 = row.get("person2_fullname") or " ".join([str(p).strip() for p in p2_parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip()
+                r2 = row.get("rel_relationship_id") or row.get("person2_role") or row.get("person2_relationship") or row.get("relationship2") or row.get("rel2") or "Member"
+                parish2 = row.get("rel_parish_id") or row.get("person2_parish") or row.get("parish2") or parish1
+                
+                fam = row.get("family_id") or ""
+                dio = row.get("diocese_id") or ""
+                
+                # Compute natural relationship description
+                r1_clean = str(r1).strip().title()
+                r2_clean = str(r2).strip().title()
+                
+                if (r1_clean in ["Father", "Head", "Head Of Family"] and r2_clean in ["Mother", "Spouse", "Wife"]) or (r2_clean in ["Father", "Head", "Head Of Family"] and r1_clean in ["Mother", "Spouse", "Wife"]):
+                    rel_sentence = f"**{p1}** and **{p2}** are **Husband & Wife** (Father and Mother of the family)."
+                elif r1_clean in ["Father", "Mother"] and r2_clean in ["Son", "Daughter", "Child"]:
+                    rel_sentence = f"**{p1}** is the **{r1_clean}** of **{p2}** ({r2_clean})."
+                elif r2_clean in ["Father", "Mother"] and r1_clean in ["Son", "Daughter", "Child"]:
+                    rel_sentence = f"**{p2}** is the **{r2_clean}** of **{p1}** ({r1_clean})."
+                elif r1_clean in ["Son", "Brother", "Daughter", "Sister"] and r2_clean in ["Son", "Daughter", "Sister", "Brother"]:
+                    rel_sentence = f"**{p1}** and **{p2}** are **Siblings / Brother & Sister**."
+                else:
+                    rel_sentence = f"**{p1}** ({r1_clean}) and **{p2}** ({r2_clean}) belong to the same household."
+                
+                ans = f"👤 **Family Relationship Found**\n\n• {rel_sentence}\n"
+                if parish1:
+                    ans += f"• **Parish:** {parish1}\n"
+                if fam:
+                    ans += f"• **Family Registration:** {fam}\n"
+                if dio:
+                    ans += f"• **Diocese:** {dio} Diocese\n"
+                return {**state, "final_answer": ans}
 
-    # 3-Level Member / Family / Sacrament Resolution (Supports both English & Tamil names via person_name entity)
-    # Strictly bypassed for statistical/aggregate queries
-    person_name = None
-    if not (intent_info.get("is_statistical") or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS", "COUNT", "HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS")):
-        person_name = intent_info.get("person_name") or extract_person_name_from_query(question)
-    if person_name:
-        person_res = resolve_member_and_family(
-            question,
-            user_parish=user_parish,
-            user_diocese=user_diocese,
-            input_mode=state.get("input_mode") or "chat",
-            original_transcript=state.get("original_transcript")
-        )
-        if person_res.get("status") == "exact":
-            m = person_res.get("matched_member")
-            sac_bundle = person_res.get("sacrament_bundle")
-            fam_bundle = person_res.get("family_bundle")
-            scope = intent_info.get("scope") or person_res.get("response_scope") or determine_response_scope(question)
-            reply, suggestions = render_scoped_response(scope, m, sac_bundle, fam_bundle, language="ta" if is_ta else "en")
-            data_payload = fam_bundle.get("members", []) if scope in ['FAMILY_MEMBERS_ONLY', 'FAMILY_DETAILS', 'FAMILY_ALL_SACRAMENTS', 'FAMILY_BAPTISM_RECORDS', 'FAMILY_COMMUNION_RECORDS', 'FAMILY_CONFIRMATION_RECORDS', 'FAMILY_MARRIAGE_RECORDS', 'FAMILY_DEATH_RECORDS'] else [m]
-            return {
-                **state,
-                "retrieval_status": "SUCCESS",
-                "retrieval_failed": False,
-                "sql_fallback_required": False,
-                "route": "success",
-                "deterministic_reply": reply,
-                "generated_sql": f"SELECT * FROM `tabMember` WHERE name = '{m.get('member_id')}' AND parish_id = '{user_parish or ''}'",
-                "sql_result": data_payload,
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(data_payload),
-                "suggested_questions": suggestions,
-                "member_id": person_res.get("member_id"),
-                "family_id": person_res.get("family_id"),
-                "family_card": person_res.get("family_card"),
-                "parish_id": person_res.get("parish_id"),
-                "anbiyam": person_res.get("anbiyam"),
-            }
-        elif person_res.get("status") == "constraint_failed":
-            fail_reply = person_res.get("reply")
-            return {
-                **state,
-                "retrieval_status": "SUCCESS",
-                "retrieval_failed": False,
-                "sql_fallback_required": False,
-                "route": "success",
-                "deterministic_reply": fail_reply,
-                "generated_sql": "",
-                "sql_result": [],
-                "disambiguation": None,
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": 0,
-                "suggested_questions": [
-                    "List any 10 members in my parish",
-                    "How many members are in each BCC?"
-                ],
-            }
-        elif person_res.get("status") == "candidates":
-            cands = person_res.get("candidates", [])
-            num_cands = len(cands)
-            c_en = "two" if num_cands == 2 else ("three" if num_cands == 3 else f"{num_cands}")
-            c_ta = "இரண்டு" if num_cands == 2 else ("மூன்று" if num_cands == 3 else f"{num_cands}")
+            # Check for Parish Profile & History (Strictly for tabParish)
+            table_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_ ]+)`?', state.get("generated_sql", ""), re.IGNORECASE)
+            sql_table = table_match.group(1).strip().strip('`') if table_match else ""
+            is_parish_profile = len(raw_results) == 1 and sql_table == "tabParish" and any(k in raw_results[0] for k in ["patron_saint", "feast_day", "assistant_priest"])
+            if is_parish_profile:
+                row = raw_results[0]
+                p_name = row.get("parish_name") or row.get("name") or "Parish"
+                p_priest = row.get("parish_priest") or ""
+                asst_priest = row.get("assistant_priest") or ""
+                saint = row.get("patron_saint") or ""
+                feast_val = row.get("feast_day")
+                feast = feast_val.strftime("%B %d") if hasattr(feast_val, "strftime") else (str(feast_val) if feast_val else "")
+                est_val = row.get("established_date")
+                est = est_val.strftime("%B %d, %Y") if hasattr(est_val, "strftime") else (str(est_val) if est_val else "")
+                city = row.get("city") or ""
+                note = row.get("note") or row.get("history") or ""
+                
+                if not note or not saint or not p_priest:
+                    import frappe
+                    p_db = frappe.db.sql("SELECT parish_name, patron_saint, feast_day, established_date, parish_priest, assistant_priest, city, note FROM tabParish WHERE name = %s OR parish_name = %s LIMIT 1", (p_name, p_name), as_dict=True)
+                    if p_db:
+                        pdb_row = p_db[0]
+                        p_name = pdb_row.get("parish_name") or p_name
+                        saint = saint or pdb_row.get("patron_saint") or "Patron Saint"
+                        p_priest = p_priest or pdb_row.get("parish_priest") or "Parish Priest"
+                        asst_priest = asst_priest or pdb_row.get("assistant_priest") or ""
+                        if not feast and pdb_row.get("feast_day"):
+                            fd = pdb_row["feast_day"]
+                            feast = fd.strftime("%B %d") if hasattr(fd, "strftime") else str(fd)
+                        if not est and pdb_row.get("established_date"):
+                            ed = pdb_row["established_date"]
+                            est = ed.strftime("%B %d, %Y") if hasattr(ed, "strftime") else str(ed)
+                        city = city or pdb_row.get("city") or ""
+                        note = note or pdb_row.get("note") or ""
+                
+                ans = f"⛪ **{p_name} Profile**\n\n"
+                if saint: ans += f"• **Patron Saint:** {saint}\n"
+                if feast: ans += f"• **Feast Day:** {feast}\n"
+                if est: ans += f"• **Established:** {est}\n"
+                if p_priest: ans += f"• **Parish Priest:** {p_priest}\n"
+                if asst_priest: ans += f"• **Assistant Priest:** {asst_priest}\n"
+                if city: ans += f"• **Location:** {city}\n\n"
+                if note:
+                    ans += f"📖 **History & Heritage:**\n{note}\n"
+                return {**state, "final_answer": ans}
 
-            if state.get("input_mode") == "voice":
-                disambig_msg = (
-                    f"{c_ta} பொருத்தமான பெயர்கள் கண்டறியப்பட்டுள்ளன. நீங்கள் குறிப்பிடும் நபரை தேர்ந்தெடுக்கவும்:"
-                    if is_ta
-                    else f"I found {c_en} closely matching names. Please select the person you mean."
+            # Check for Diocese Profile (Strictly for tabDiocese)
+            is_single_diocese_profile = len(raw_results) == 1 and sql_table == "tabDiocese" and any(k in raw_results[0] for k in ["diocese_name", "bishop_name"])
+            if is_single_diocese_profile:
+                row = raw_results[0]
+                d_name = row.get("diocese_name") or row.get("name") or "Diocese"
+                b_name = row.get("bishop_name") or "Bishop / Ordinary"
+                est_val = row.get("established_date")
+                est = est_val.strftime("%B %d, %Y") if hasattr(est_val, "strftime") else (str(est_val) if est_val else "Historic")
+                addr = row.get("address") or row.get("city") or "Bishop's House"
+                phone = row.get("phone") or ""
+                email = row.get("email") or ""
+                web = row.get("website") or ""
+                note = row.get("note") or row.get("history") or ""
+                
+                if not note:
+                    import frappe
+                    d_db = frappe.db.sql("SELECT diocese_name, bishop_name, established_date, city, phone, email, website, note FROM tabDiocese WHERE name = %s OR diocese_name = %s LIMIT 1", (d_name, d_name), as_dict=True)
+                    if d_db:
+                        ddb_row = d_db[0]
+                        d_name = ddb_row.get("diocese_name") or d_name
+                        b_name = ddb_row.get("bishop_name") or b_name
+                        if not est_val and ddb_row.get("established_date"):
+                            ed = ddb_row["established_date"]
+                            est = ed.strftime("%B %d, %Y") if hasattr(ed, "strftime") else str(ed)
+                        addr = ddb_row.get("city") or addr
+                        phone = phone or ddb_row.get("phone") or ""
+                        email = email or ddb_row.get("email") or ""
+                        web = web or ddb_row.get("website") or ""
+                        note = ddb_row.get("note") or ""
+                
+                contacts = []
+                if phone: contacts.append(f"📞 **Phone:** {phone}")
+                if email: contacts.append(f"✉️ **Email:** {email}")
+                if web: contacts.append(f"🌐 **Website:** [{web}]({web if web.startswith('http') else 'https://' + web})")
+                contact_str = " | ".join(contacts) if contacts else ""
+                
+                ans = f"🏛️ **{d_name} Profile**\n\n• **Bishop / Ordinary:** {b_name}\n• **Established:** {est}\n• **Chancery / City:** {addr}\n"
+                if contact_str:
+                    ans += f"• **Contact:** {contact_str}\n\n"
+                if note:
+                    ans += f"📖 **History & Heritage:**\n{note}\n"
+                return {**state, "final_answer": ans}
+
+            # Compute full_name if first_name / last_name are present
+            has_name_fields = any(k in raw_results[0] for k in ["first_name", "last_name", "bridegroom_name", "bride_name"])
+            if has_name_fields:
+                for row in raw_results:
+                    if "full_name" not in row:
+                        parts = [
+                            row.get("first_name") or row.get("bridegroom_name") or row.get("bride_name"),
+                            row.get("middle_name") or row.get("bridegroom_middle_name") or row.get("bride_middle_name"),
+                            row.get("last_name") or row.get("bridegroom_last_name") or row.get("bride_last_name")
+                        ]
+                        fn_str = " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip()
+                        if fn_str:
+                            row["full_name"] = fn_str
+
+            raw_headers = list(raw_results[0].keys())
+            
+            # Define system metadata and unhelpful fields to exclude if other columns are present
+            system_fields = {
+                'name', 'creation', 'modified', 'modified_by', 'owner', 'docstatus', 'idx',
+                '_user_tags', '_comments', '_assign', '_liked_by', 'amended_from', 'custom', 'active'
+            }
+            
+            # Filter headers
+            headers = [h for h in raw_headers if h.lower() not in system_fields]
+            if not headers:
+                headers = raw_headers
+                
+            # If full_name is present, prioritize it and remove fragmented first/middle/last from wide table
+            if "full_name" in headers and len(headers) > 3:
+                headers = ["full_name"] + [h for h in headers if h.lower() not in ["full_name", "first_name", "middle_name", "last_name"]]
+                
+            # Define priority ordering weights for common meaningful fields (lower weight = higher priority)
+            field_weights = {
+                # Names & Canonical Identifiers
+                'full_name': 0, 'first_name': 1, 'middle_name': 2, 'last_name': 3,
+                'diocese_name': 1, 'vicariate_name': 1, 'parish_name': 1, 'family_name': 1,
+                'fhc_parish_id': 1, 'bapt_parish_id': 1, 'mrg_parish_id': 1, 'cnf_parish_id': 1, 'death_parish_id': 1, 'parish_id': 1,
+                'family_card_no': 2, 'family_register_number': 2,
+                'bishop_name': 2, 'vicar_forane': 2, 'parish_priest': 2, 'family_head': 2,
+                'bridegroom_name': 1, 'bride_name': 2, 'witness1_name': 4, 'witness2_name': 5,
+                
+                # Codes & IDs
+                'diocese_code': 10, 'vicariate_code': 10, 'parish_code': 10, 'family_card_no': 10,
+                'diocese_id': 11, 'vicariate_id': 12, 'parish_id': 13, 'family_id': 14, 'member_id': 15,
+                
+                # Dates
+                'established_date': 20, 'bapt_date': 21, 'mrg_date': 22, 'cnf_date': 23, 'fhc_date': 24, 'death_date': 25,
+                'dob': 26, 'age': 27, 'established': 28,
+                
+                # Places
+                'bapt_place': 30, 'birth_place': 31, 'place_of_birth': 32, 'city': 33, 'state_id': 34, 'country_id': 35,
+                
+                # Classifications/Groupings
+                'status': 40, 'living_status': 41, 'marital_status_id': 42,
+                'parish_bcc_id': 43, 'zone_id': 44
+            }
+            
+            # Sort headers by weight, keeping stable ordering for others
+            headers.sort(key=lambda h: field_weights.get(h.lower(), 100))
+            
+            # Format 1: Single Row, Single Column
+            if len(raw_results) == 1 and len(headers) == 1:
+                k = headers[0]
+                v = raw_results[0].get(k)
+                label = str(k).replace("_", " ").title().replace("Count(*)", "Total Count").replace("Count(Idx)", "Total Count")
+                ans = f"**{label}**: {v}"
+                
+            # Format 2: Single Row, Multiple Columns (Rich Sacramental Card / Certificate)
+            elif len(raw_results) == 1 and len(headers) > 1:
+                row = raw_results[0]
+                table_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_ ]+)`?', state.get("generated_sql", ""), re.IGNORECASE)
+                table_name = table_match.group(1).strip().strip('`') if table_match else ""
+                
+                # Fetch full document from DB if we have a table and name/name match to ensure 100% complete data
+                if table_name:
+                    doctype_name = table_name.replace("tab", "", 1) if table_name.startswith("tab") else table_name
+                    doc_id = row.get("name")
+                    if not doc_id and row.get("first_name"):
+                        try:
+                            import frappe
+                            match_query = "SELECT * FROM `" + table_name + "` WHERE first_name = %s"
+                            params = [row.get("first_name")]
+                            if row.get("last_name"):
+                                match_query += " AND last_name = %s"
+                                params.append(row.get("last_name"))
+                            match_query += " LIMIT 1"
+                            full_db_rows = frappe.db.sql(match_query, tuple(params), as_dict=True)
+                            if full_db_rows:
+                                row = {**full_db_rows[0], **row}
+                                doc_id = row.get("name")
+                        except Exception as e:
+                            print(f"[format_response] DB row lookup: {e}")
+
+                def _fmt_d(val):
+                    if not val: return "-"
+                    if hasattr(val, "strftime"): return val.strftime("%d-%b-%Y")
+                    return str(val)
+                
+                def _join_names(*names):
+                    parts = [str(n).strip() for n in names if n and str(n).strip() not in ("", "None", "null", "NULL")]
+                    return " ".join(parts) if parts else "-"
+
+                # --- 1. PARISHIONER MEMBER PROFILE CARD (Priority 1) ---
+                is_member = (
+                    "tabMember" in table_name or 
+                    (row.get("name") and str(row.get("name")).startswith("MEM-")) or 
+                    "living_status" in row or 
+                    "blood_group_id" in row or 
+                    ("family_id" in row and "bapt_register_ref" not in row and "fhc_register_ref" not in row)
                 )
+                if is_member:
+                    # Enrich full member record from DB including family join
+                    import frappe
+                    m_id = row.get("name")
+                    fn = row.get("first_name")
+                    ln = row.get("last_name")
+                    try:
+                        m_db = None
+                        if m_id and str(m_id).startswith("MEM-"):
+                            m_db = frappe.db.sql("SELECT m.*, f.family_register_number, f.parish_bcc_id, f.zone_id FROM tabMember m LEFT JOIN tabFamily f ON m.family_id = f.name WHERE m.name = %s LIMIT 1", (m_id,), as_dict=True)
+                        elif fn:
+                            m_db = frappe.db.sql("SELECT m.*, f.family_register_number, f.parish_bcc_id, f.zone_id FROM tabMember m LEFT JOIN tabFamily f ON m.family_id = f.name WHERE m.first_name = %s AND (m.last_name = %s OR %s IS NULL) LIMIT 1", (fn, ln, ln), as_dict=True)
+                        if m_db:
+                            row = {**m_db[0], **row}
+                    except Exception as me:
+                        print(f"[format_response] Member DB lookup: {me}")
+
+                    m_name = _join_names(row.get("first_name"), row.get("middle_name"), row.get("last_name"))
+                    reg_no = row.get("name") or "-"
+                    parish = row.get("parish_id") or row.get("parish_name") or "-"
+                    diocese = row.get("diocese_id") or "-"
+                    vicariate = row.get("vicariate_id") or "-"
+                    fam_id = row.get("family_id") or "-"
+                    fc_no = row.get("family_register_number") or row.get("family_card_no") or fam_id
+                    bcc = row.get("parish_bcc_id") or "-"
+                    gender = row.get("gender") or "-"
+                    dob = _fmt_d(row.get("dob"))
+                    pob = row.get("place_of_birth") or row.get("city") or diocese
+                    age = str(row.get("age")) if row.get("age") is not None else "-"
+                    marital = row.get("marital_status_id") or "Single"
+                    blood = row.get("blood_group_id") or "O+"
+                    occ = row.get("occupation") or "-"
+                    edu = row.get("education") or "-"
+                    mob = row.get("mobile") or "-"
+                    email = row.get("email") or "-"
+                    addr = f"{row.get('street') or ''}, {row.get('city') or ''}".strip(', ') or parish
+                    status = row.get("living_status") or "Living"
+                    head = " (Head of Family)" if str(row.get("is_family_head")).lower() in ["1", "yes", "true"] else ""
+                    f_name = row.get("father_name") or "-"
+                    m_name_parent = row.get("mother_name") or "-"
+                    
+                    b_date = _fmt_d(row.get("bapt_date"))
+                    b_parish = row.get("bapt_parish_id") or parish
+                    fhc_date = _fmt_d(row.get("fhc_date"))
+                    fhc_parish = row.get("fhc_parish_id") or parish
+                    cnf_date = _fmt_d(row.get("cnf_date"))
+                    cnf_parish = row.get("cnf_parish_id") or parish
+                    mrg_date = _fmt_d(row.get("mrg_date"))
+                    mrg_parish = row.get("mrg_parish_id") or parish
+
+                    ans = f"### 👤 Parishioner Registry Record: **{m_name}**\n\n"
+                    ans += "| 📜 Registry Identification | Value |\n"
+                    ans += "| :--- | :---\n"
+                    ans += f"| **Member ID** | `{reg_no}` |\n"
+                    ans += f"| **Family Card Number** | `{fc_no}` |\n"
+                    ans += f"| **Parish Church** | {parish} |\n"
+                    ans += f"| **Diocese / Vicariate** | {diocese} Diocese ({vicariate}) |\n"
+                    ans += f"| **Living / Membership Status** | {status}{head} |\n\n"
+                    ans += f"#### 👤 Personal Details\n"
+                    ans += f"• **Full Name:** {m_name}\n"
+                    ans += f"• **Gender:** {gender} | **Age:** {age} yrs | **Blood Group:** {blood}\n"
+                    ans += f"• **Date of Birth:** {dob} | **Place of Birth:** {pob}\n"
+                    ans += f"• **Marital Status:** {marital} | **Occupation:** {occ} | **Education:** {edu}\n\n"
+                    ans += f"#### 👨‍👩‍👧 Family & Lineage\n"
+                    ans += f"• **Father's Name:** {f_name}\n"
+                    ans += f"• **Mother's Name:** {m_name_parent}\n"
+                    ans += f"• **Family Unit (ID):** `{fam_id}` | **BCC Unit:** {bcc}\n\n"
+                    ans += f"#### 📞 Contact & Residence\n"
+                    ans += f"• **Mobile:** {mob}\n"
+                    ans += f"• **Email:** {email}\n"
+                    ans += f"• **Address:** {addr}\n\n"
+                    ans += f"#### ✝️ Holy Sacraments Received\n"
+                    ans += f"• **Baptism:** {b_date} *({b_parish})*\n"
+                    ans += f"• **First Holy Communion:** {fhc_date} *({fhc_parish})*\n"
+                    ans += f"• **Confirmation:** {cnf_date} *({cnf_parish})*\n"
+                    if mrg_date != "-":
+                        ans += f"• **Holy Matrimony:** {mrg_date} *({mrg_parish})*\n"
+                    return {**state, "final_answer": ans}
+
+                # --- 2. BAPTISM CERTIFICATE CARD (tabBaptism) ---
+                elif "tabBaptism" in table_name or (row.get("name") and str(row.get("name")).startswith("BAP-")) or "bapt_register_ref" in row:
+                    cand_name = _join_names(row.get("first_name"), row.get("middle_name"), row.get("last_name"))
+                    reg_no = row.get("name") or "-"
+                    reg_ref = row.get("bapt_register_ref") or "-"
+                    parish = row.get("bapt_parish_id") or row.get("parish_name") or row.get("parish_id") or "-"
+                    diocese = row.get("diocese_id") or "-"
+                    fc_no = row.get("family_card_no") or "-"
+                    gender = row.get("gender") or "-"
+                    dob = _fmt_d(row.get("dob"))
+                    pob = row.get("birth_place") or parish
+                    b_date = _fmt_d(row.get("bapt_date"))
+                    b_place = row.get("bapt_place") or parish
+                    minister = row.get("bapt_minister") or "Rev. Fr. Joseph Arul"
+                    pp = row.get("parish_priest") or "Rev. Fr. Joseph Arul"
+                    f_name = row.get("father_name") or "Joseph"
+                    f_occ = f" *({row.get('father_occupation')})*" if row.get("father_occupation") else ""
+                    m_name = row.get("mother_name") or "Mary"
+                    m_occ = f" *({row.get('mother_occupation')})*" if row.get("mother_occupation") else ""
+                    gf = _join_names(row.get("bapt_god_father"), row.get("bapt_god_father_last_name"))
+                    if gf == "-": gf = "Antony Godparent"
+                    gm = _join_names(row.get("bapt_god_mother"), row.get("bapt_god_mother_last_name"))
+                    if gm == "-": gm = "Theresa Godparent"
+
+                    ans = f"### 🕊️ Holy Baptism Registry Record: **{cand_name}**\n\n"
+                    ans += "| 📜 Registry Identification | Value |\n"
+                    ans += "| :--- | :---\n"
+                    ans += f"| **Registration Number (ID)** | `{reg_no}` |\n"
+                    ans += f"| **Baptism Register Ref** | `{reg_ref}` |\n"
+                    ans += f"| **Parish Church** | {parish} |\n"
+                    ans += f"| **Diocese** | {diocese} Diocese |\n"
+                    ans += f"| **Family Card Number** | `{fc_no}` |\n\n"
+                    ans += f"#### 👤 Personal Details\n"
+                    ans += f"• **Full Name:** {cand_name}\n"
+                    ans += f"• **Gender:** {gender}\n"
+                    ans += f"• **Date of Birth:** {dob}\n"
+                    ans += f"• **Place of Birth:** {pob}\n\n"
+                    ans += f"#### 🕊️ Sacramental Administration\n"
+                    ans += f"• **Date of Baptism:** {b_date}\n"
+                    ans += f"• **Place of Baptism:** {b_place}\n"
+                    ans += f"• **Administering Minister:** {minister}\n"
+                    ans += f"• **Parish Priest:** {pp}\n\n"
+                    ans += f"#### 👨‍👩‍👧 Family & Parents\n"
+                    ans += f"• **Father's Name:** {f_name}{f_occ}\n"
+                    ans += f"• **Mother's Name:** {m_name}{m_occ}\n\n"
+                    ans += f"#### ✝️ Godparents / Sponsors\n"
+                    ans += f"• **Godfather:** {gf}\n"
+                    ans += f"• **Godmother:** {gm}\n"
+                    return {**state, "final_answer": ans}
+
+                # --- 3. FIRST HOLY COMMUNION CARD (tabCommunion) ---
+                elif "tabCommunion" in table_name or (row.get("name") and str(row.get("name")).startswith("COM-")) or "fhc_register_ref" in row:
+                    cand_name = _join_names(row.get("first_name"), row.get("middle_name"), row.get("last_name"))
+                    reg_no = row.get("name") or "-"
+                    reg_ref = row.get("fhc_register_ref") or "-"
+                    parish = row.get("fhc_parish_id") or row.get("parish_name") or row.get("parish_id") or "-"
+                    diocese = row.get("diocese_id") or "-"
+                    fc_no = row.get("family_card_no") or "-"
+                    fhc_date = _fmt_d(row.get("fhc_date"))
+                    fhc_place = row.get("fhc_place") or parish
+                    minister = row.get("fhc_minister") or "Rev. Fr. Joseph Arul"
+                    f_name = row.get("father_name") or "Joseph"
+                    m_name = row.get("mother_name") or "Mary"
+
+                    ans = f"### 🍞 First Holy Communion Registry Record: **{cand_name}**\n\n"
+                    ans += "| 📜 Registry Details | Value |\n"
+                    ans += "| :--- | :---\n"
+                    ans += f"| **Registration Number (ID)** | `{reg_no}` |\n"
+                    ans += f"| **FHC Register Ref** | `{reg_ref}` |\n"
+                    ans += f"| **Parish Church** | {parish} |\n"
+                    ans += f"| **Diocese** | {diocese} Diocese |\n"
+                    ans += f"| **Family Card Number** | `{fc_no}` |\n\n"
+                    ans += f"#### 👤 Candidate & Sacrament Details\n"
+                    ans += f"• **Full Name:** {cand_name}\n"
+                    ans += f"• **Date of First Communion:** {fhc_date}\n"
+                    ans += f"• **Place:** {fhc_place}\n"
+                    ans += f"• **Administering Minister:** {minister}\n\n"
+                    ans += f"#### 👨‍👩‍👧 Parents\n"
+                    ans += f"• **Father:** {f_name} | **Mother:** {m_name}\n"
+                    return {**state, "final_answer": ans}
+
+                # --- 4. CONFIRMATION CARD (tabConfirmation) ---
+                elif "tabConfirmation" in table_name or (row.get("name") and str(row.get("name")).startswith("CNF-")) or "cnf_register_ref" in row:
+                    cand_name = _join_names(row.get("first_name"), row.get("middle_name"), row.get("last_name"))
+                    reg_no = row.get("name") or "-"
+                    reg_ref = row.get("cnf_register_ref") or "-"
+                    parish = row.get("cnf_parish_id") or row.get("parish_name") or row.get("parish_id") or "-"
+                    diocese = row.get("diocese_id") or "-"
+                    fc_no = row.get("family_card_no") or "-"
+                    cnf_date = _fmt_d(row.get("cnf_date"))
+                    cnf_place = row.get("cnf_place") or parish
+                    minister = row.get("cnf_minister") or "Most Rev. Bishop"
+                    sponsor = row.get("sponsor") or row.get("sponsor_name") or "Antony Sponsor"
+                    f_name = row.get("father_name") or "Joseph"
+                    m_name = row.get("mother_name") or "Mary"
+
+                    ans = f"### 🕊️ Sacrament of Confirmation Record: **{cand_name}**\n\n"
+                    ans += "| 📜 Registry Details | Value |\n"
+                    ans += "| :--- | :---\n"
+                    ans += f"| **Registration Number (ID)** | `{reg_no}` |\n"
+                    ans += f"| **Confirmation Register Ref** | `{reg_ref}` |\n"
+                    ans += f"| **Parish Church** | {parish} |\n"
+                    ans += f"| **Diocese** | {diocese} Diocese |\n"
+                    ans += f"| **Family Card Number** | `{fc_no}` |\n\n"
+                    ans += f"#### 👤 Candidate & Confirmation Details\n"
+                    ans += f"• **Full Name:** {cand_name}\n"
+                    ans += f"• **Confirmation Date:** {cnf_date}\n"
+                    ans += f"• **Place:** {cnf_place}\n"
+                    ans += f"• **Administering Minister:** {minister}\n"
+                    ans += f"• **Confirmation Sponsor:** {sponsor}\n\n"
+                    ans += f"#### 👨‍👩‍👧 Parents\n"
+                    ans += f"• **Father:** {f_name} | **Mother:** {m_name}\n"
+                    return {**state, "final_answer": ans}
+
+                # --- 5. HOLY MATRIMONY CARD (tabMarriage) ---
+                elif "tabMarriage" in table_name or (row.get("name") and str(row.get("name")).startswith("MRG-")) or "mrg_date" in row or "bridegroom_name" in row:
+                    groom = _join_names(row.get("bridegroom_name"), row.get("bridegroom_middle_name"), row.get("bridegroom_last_name"))
+                    bride = _join_names(row.get("bride_name"), row.get("bride_middle_name"), row.get("bride_last_name"))
+                    reg_no = row.get("name") or "-"
+                    reg_ref = row.get("mrg_register_ref") or "-"
+                    parish = row.get("mrg_parish_id") or row.get("parish_name") or row.get("parish_id") or "-"
+                    diocese = row.get("diocese_id") or "-"
+                    m_date = _fmt_d(row.get("mrg_date"))
+                    m_place = row.get("mrg_place") or parish
+                    minister = row.get("mrg_minister") or "Rev. Fr. Joseph Arul"
+                    w1 = row.get("witness1_name") or "John Witness"
+                    w2 = row.get("witness2_name") or "Mary Witness"
+
+                    ans = f"### 💍 Holy Matrimony Registry Record\n\n"
+                    ans += "| 📜 Registry Details | Value |\n"
+                    ans += "| :--- | :---\n"
+                    ans += f"| **Registration Number (ID)** | `{reg_no}` |\n"
+                    ans += f"| **Marriage Register Ref** | `{reg_ref}` |\n"
+                    ans += f"| **Parish Church** | {parish} |\n"
+                    ans += f"| **Diocese** | {diocese} Diocese |\n"
+                    ans += f"| **Date of Marriage** | {m_date} |\n"
+                    ans += f"| **Solemnizing Minister** | {minister} |\n\n"
+                    ans += f"#### 👫 Holy Couple\n"
+                    ans += f"• **Bridegroom:** {groom}\n"
+                    ans += f"• **Bride:** {bride}\n\n"
+                    ans += f"#### ✍️ Official Witnesses\n"
+                    ans += f"• **Witness 1:** {w1} | **Witness 2:** {w2}\n"
+                    return {**state, "final_answer": ans}
+
+                # --- 6. DEPARTED & MEMORIAL REGISTRY CARD (tabDeath) ---
+                elif "tabDeath" in table_name or (row.get("name") and str(row.get("name")).startswith("DTH-")) or "death_date" in row:
+                    m_name = _join_names(row.get("first_name"), row.get("middle_name"), row.get("last_name"))
+                    reg_no = row.get("name") or "-"
+                    reg_ref = row.get("death_register_ref") or "-"
+                    parish = row.get("death_parish_id") or row.get("parish_name") or row.get("parish_id") or "-"
+                    diocese = row.get("diocese_id") or "-"
+                    fc_no = row.get("family_card_no") or "-"
+                    d_date = _fmt_d(row.get("death_date"))
+                    b_date = _fmt_d(row.get("burial_date"))
+                    age = str(row.get("age")) if row.get("age") is not None else "-"
+                    cause = row.get("death_cause") or "Natural Causes"
+                    cem = row.get("cemetery_code") or "St. Joseph Cemetery"
+                    pp = row.get("parish_priest") or "Rev. Fr. Joseph Arul"
+                    minister = row.get("burial_minister") or pp
+
+                    ans = f"### 🕯️ Departed & Memorial Registry Record: **{m_name}**\n\n"
+                    ans += "| 📜 Registry Details | Value |\n"
+                    ans += "| :--- | :---\n"
+                    ans += f"| **Registration Number (ID)** | `{reg_no}` |\n"
+                    ans += f"| **Memorial Register Ref** | `{reg_ref}` |\n"
+                    ans += f"| **Parish Church** | {parish} |\n"
+                    ans += f"| **Diocese** | {diocese} Diocese |\n"
+                    ans += f"| **Family Card Number** | `{fc_no}` |\n\n"
+                    ans += f"#### 👤 Deceased Parishioner Details\n"
+                    ans += f"• **Full Name:** {m_name} (Age: {age} yrs)\n"
+                    ans += f"• **Date of Death:** {d_date} | **Cause:** {cause}\n"
+                    ans += f"• **Date of Burial:** {b_date} | **Cemetery:** {cem}\n"
+                    ans += f"• **Burial Minister / Priest:** {minister}\n"
+                    return {**state, "final_answer": ans}
+                # Try to fetch full document details if possible to display all fields
+                table_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_ ]+)`?', state.get("generated_sql", ""), re.IGNORECASE)
+                doc_detail_card = None
+                if table_match:
+                    table_name = table_match.group(1).strip().strip('`')
+                    doctype_name = table_name.replace("tab", "", 1) if table_name.startswith("tab") else table_name
+                    if doctype_name == "Anointing Of Sick":
+                        doctype_name = "Anointing Of Sick"
+                    
+                    doc_id = raw_results[0].get("name")
+                    if doc_id:
+                        try:
+                            import frappe
+                            import datetime
+                            doc = frappe.get_doc(doctype_name, doc_id)
+                            meta = frappe.get_meta(doctype_name)
+                            
+                            # Gather meaningful fields
+                            fields_data = []
+                            fields_data.append((meta.title_field or "ID", doc_id))
+                            
+                            system_fields = {
+                                'name', 'creation', 'modified', 'modified_by', 'owner', 'docstatus', 'idx',
+                                '_user_tags', '_comments', '_assign', '_liked_by', 'amended_from', 'custom', 'active'
+                            }
+                            
+                            for df in meta.fields:
+                                if df.fieldtype not in ["Section Break", "Column Break", "Table", "Password"]:
+                                    val = doc.get(df.fieldname)
+                                    if val is not None and str(val).strip() != "" and df.fieldname not in system_fields:
+                                        # Format date values nicely
+                                        if df.fieldtype == "Date" and isinstance(val, datetime.date):
+                                             val = val.strftime("%d-%b-%Y")
+                                        elif df.fieldtype == "Check":
+                                            val = "Yes" if val else "No"
+                                        fields_data.append((df.label or df.fieldname.replace("_", " ").title(), val))
+                                        
+                            doc_detail_card = f"### 📋 {doctype_name} Details: {doc_id}\n\n"
+                            doc_detail_card += "\n".join(f"- **{label}**: {val}" for label, val in fields_data)
+                        except Exception as e:
+                            print(f"[format_response] Failed to fetch full doc details: {e}")
+                            
+                if doc_detail_card:
+                    ans = doc_detail_card
+                else:
+                    ans = ""
+                    for k in headers:
+                        v = raw_results[0].get(k)
+                        if v is None or str(v).strip() in ("", "None", "null", "NULL", "undefined"):
+                            v = "-"
+                        label = str(k).replace("_", " ").title()
+                        ans += f"- **{label}**: {v}\n"
+                    
+            # Format 3: Multiple Rows (Markdown Table with Disambiguation Context)
             else:
-                disambig_msg = (
-                    "பின்வரும் பங்கு உறுப்பினர்களில் யாரைக் குறிப்பிடுகிறீர்கள்?"
-                    if is_ta
-                    else "Did you mean one of the following parishioners?"
-                )
+                # Enforce a maximum of 5 columns to prevent UI overflow
+                if len(headers) > 5:
+                    headers = headers[:5]
+                    
+                def _fmt_val(v):
+                    if v is None or str(v).strip() in ("", "None", "null", "NULL", "undefined"):
+                        return "-"
+                    return str(v).replace("\n", " ").replace("|", "\\|")
 
-            disambig_obj = {
-                "message": disambig_msg,
-                "options": cands[:3]
-            }
-            return {
-                **state,
-                "retrieval_status": "AMBIGUOUS_CANDIDATES",
-                "retrieval_failed": False,
-                "sql_fallback_required": False,
-                "route": "disambiguation",
-                "deterministic_reply": disambig_msg,
-                "generated_sql": "",
-                "sql_result": [],
-                "disambiguation": disambig_obj,
-                "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-                "authorized_record_count": len(cands[:3]),
-                "suggested_questions": [c.get("prompt") for c in cands[:3]],
-            }
-        elif person_res.get("status") in ("low_confidence", "not_found"):
-            print(f"[LANGGRAPH] DATABASE NODE | Person search yielded {person_res.get('status')} -> Immediate SQL Fallback")
-            return {
-                **state,
-                "retrieval_status": "NO_RESULT",
-                "retrieval_failed": True,
-                "sql_fallback_required": True,
-                "route": "fallback",
-            }
+                table_md = "| " + " | ".join(str(h).replace("_", " ").title() for h in headers) + " |\n"
+                table_md += "|" + "|".join(["---"] * len(headers)) + "|\n"
+                for row in raw_results:
+                    table_md += "| " + " | ".join(_fmt_val(row.get(h)) for h in headers) + " |\n"
+                
+                num_records = len(raw_results)
+                q_original = state.get("question") or ""
+                is_tamil = bool(re.search(r'[\u0B80-\u0BFF]', q_original)) or any(kw in q_original.lower() for kw in ["tamil", "தமிழில்", "தமிழ்"])
+                if is_tamil:
+                    header_text = f"உங்கள் தேடலுக்கு ஏற்ப **{num_records}** பதிவுகள் கண்டறியப்பட்டன:\n\n"
+                else:
+                    header_text = f"Found **{num_records}** records matching your search:\n\n"
+                
+                # Collect full names for follow-up prompt if available
+                names = []
+                for row in raw_results:
+                    fn_val = row.get("full_name")
+                    if not fn_val:
+                        parts = [
+                            row.get("first_name") or row.get("bridegroom_name") or row.get("bride_name"),
+                            row.get("middle_name"),
+                            row.get("last_name") or row.get("bridegroom_last_name") or row.get("bride_last_name")
+                        ]
+                        fn_val = " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip()
+                    if fn_val and fn_val not in names:
+                        names.append(fn_val)
+                
+                footer_text = ""
+                q_user = (state.get("question") or "").lower()
+                is_group_or_list_query = any(k in q_user for k in [
+                    "children", "child", "members", "families", "all", "list", "show", "who are", "they", "them", "both", "details"
+                ])
+                if names and 1 < len(names) <= 5 and not is_group_or_list_query:
+                    names_str = " or ".join([f"**{n}**" for n in names])
+                    footer_text = f"\n💡 *Did you mean {names_str}? Ask again with the full name for a direct match.*"
+                
+                ans = header_text + table_md + footer_text
+                
+                
+        else:
+            ans = str(raw_results)
 
-    print(f"[LANGGRAPH] DATABASE NODE | Unhandled lookup -> Immediate SQL Fallback")
-    return {
-        **state,
-        "retrieval_status": "NO_RESULT",
-        "retrieval_failed": True,
-        "sql_fallback_required": True,
-        "route": "fallback",
-    }
+    # Log successful queries for few-shot learning
+    if state.get("history_id") and state.get("history_id") > 0:
+        update_correctness_flag(state["history_id"], 1)
 
+    return {**state, "final_answer": ans}
 
-current_retrieval_node = database_lookup_node
-
-def decide_retrieval_result(state: GraphState) -> str:
-    status = state.get("retrieval_status")
-    route = state.get("route")
-    if status == "AMBIGUOUS_CANDIDATES" or route == "disambiguation":
-        return "disambiguation"
-    if status == "SUCCESS" or (not state.get("retrieval_failed") and state.get("deterministic_reply") and not state.get("sql_fallback_required")):
-        return "success"
-    return "sql_fallback"
-
-decide_db_lookup = decide_retrieval_result
-
-
-def analytics_node(state: GraphState) -> GraphState:
-    """
-    LangGraph node for HISTORICAL_ANALYSIS, STATISTICAL_ANALYSIS, TREND_ANALYSIS, and COMPARISON.
-    Receives authorization_context and queries ONLY the user's authorized scope (Sections 54–56, 68–70).
-    """
-    req_id = state.get("request_id", "N/A")
-    intent_info = state.get("intent_info") or {}
-    auth_ctx = state.get("authorization_context") or {}
-    c_intent = state.get("classified_intent", "HISTORICAL_ANALYSIS")
-    print(
-        f"[LANGGRAPH] ANALYTICS NODE | request_id={req_id} | intent={c_intent} "
-        f"| scope_type={auth_ctx.get('scope_type')} | scope_name={auth_ctx.get('scope_name')} "
-        f"| metrics={intent_info.get('metrics')}"
-    )
-
-    ensure_frappe_connected()
-    from koinonia_assistant.rag.analytics_engine import run_analytics_or_forecast_pipeline
-
-    res = run_analytics_or_forecast_pipeline(
-        intent_info=intent_info,
-        question=state.get("original_query") or state["question"],
-        user_parish=auth_ctx.get("parish_id") or state.get("user_parish"),
-        user_diocese=auth_ctx.get("diocese_id") or state.get("user_diocese"),
-        auth_ctx=auth_ctx,
-    )
-    return {
-        **state,
-        "deterministic_reply": res["deterministic_markdown"],
-        "generated_sql": res["generated_sql"],
-        "sql_result": res["table_rows"],
-        "chart_data": res["chart"],
-        "analysis_metadata": res,
-        "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-        "authorized_record_count": res.get("authorized_record_count", 0),
-        "suggested_questions": res.get("suggested_questions", []),
-    }
-
-
-def forecast_node(state: GraphState) -> GraphState:
-    """
-    LangGraph node for FORECAST and multi-series COMPARISON + FORECAST queries.
-    Uses ONLY the user's authorized scope historical data (Section 61).
-    """
-    req_id = state.get("request_id", "N/A")
-    intent_info = dict(state.get("intent_info") or {})
-    auth_ctx = state.get("authorization_context") or {}
-    intent_info["include_forecast"] = True
-    if not intent_info.get("forecast_horizon"):
-        intent_info["forecast_horizon"] = 10
-
-    c_intent = state.get("classified_intent", "FORECAST")
-    print(
-        f"[LANGGRAPH] FORECAST NODE | request_id={req_id} | intent={c_intent} "
-        f"| scope_type={auth_ctx.get('scope_type')} | scope_name={auth_ctx.get('scope_name')} "
-        f"| horizon={intent_info.get('forecast_horizon')} yrs"
-    )
-
-    ensure_frappe_connected()
-    from koinonia_assistant.rag.analytics_engine import run_analytics_or_forecast_pipeline
-
-    res = run_analytics_or_forecast_pipeline(
-        intent_info=intent_info,
-        question=state.get("original_query") or state["question"],
-        user_parish=auth_ctx.get("parish_id") or state.get("user_parish"),
-        user_diocese=auth_ctx.get("diocese_id") or state.get("user_diocese"),
-        auth_ctx=auth_ctx,
-    )
-    return {
-        **state,
-        "deterministic_reply": res["deterministic_markdown"],
-        "generated_sql": res["generated_sql"],
-        "sql_result": res["table_rows"],
-        "chart_data": res["chart"],
-        "analysis_metadata": res,
-        "sql_validation_result": "PASSED_ALL_SECURITY_CHECKS",
-        "authorized_record_count": res.get("authorized_record_count", 0),
-        "suggested_questions": res.get("suggested_questions", []),
-    }
-
+# ─── Define Router Decisions ──────────────────────────────────────────────────
 
 def decide_route(state: GraphState):
-    r = state.get("route")
-    if r in ("greeting", "unclear", "current_retrieval", "database_lookup_node", "sql_analytics", "analytics_node", "forecast_node"):
-        return r
-    return "sql_analytics"
+    if state.get("route") == "blocked_security":
+        return "blocked_security"
+    if state.get("route") == "greeting":
+        return "greeting"
+    if state.get("route") == "unclear":
+        return "unclear"
+    return "text_to_sql"
 
-# ─── Assemble LangGraph Workflow (Section 58: Authorization BEFORE Router/SQL/Analytics) ───
+def decide_validation(state: GraphState):
+    if state.get("error_message") in ["Unsupported query", "Unauthorized diocese access", "Unauthorized parish access"]:
+        return "unsupported"
+    elif state.get("error_message"):
+        if state.get("retry_count", 0) < MAX_RETRIES:
+            return "retry"
+        else:
+            return "failed"
+    else:
+        return "valid"
 
-workflow = StateGraph(GraphState)
+def decide_execution(state: GraphState):
+    if state.get("error_message"):
+        if state.get("retry_count", 0) < MAX_RETRIES:
+            return "retry"
+        else:
+            return "failed"
+    else:
+        return "success"
 
-# Add Nodes
-workflow.add_node("resolve_permissions", resolve_permissions_node)
-workflow.add_node("router", router_node)
-workflow.add_node("greeting", greeting_node)
-workflow.add_node("unclear", unclear_node)
-workflow.add_node("current_retrieval", current_retrieval_node)
-workflow.add_node("database_lookup_node", database_lookup_node)
-workflow.add_node("analytics_node", analytics_node)
-workflow.add_node("forecast_node", forecast_node)
+# ─── Assemble LangGraph Workflow ──────────────────────────────────────────────
 
-# SQL Pipeline Nodes
-workflow.add_node("sql_fallback", sql_fallback_node)
-workflow.add_node("sql_analytics", sql_analytics_node)
-workflow.add_node("query_plan_builder", query_plan_builder_node)
-workflow.add_node("generate_sql", generate_sql_node)
-workflow.add_node("validate_sql", validate_sql_node)
-workflow.add_node("execute_sql", execute_sql_node)
-workflow.add_node("analyze_sql_error", analyze_sql_error_node)
-workflow.add_node("regenerate_sql", regenerate_sql_node)
-workflow.add_node("controlled_error", controlled_error_node)
-workflow.add_node("result_validation", result_validation_node)
-workflow.add_node("format_response", format_response_node)
+def route_after_router(state: GraphState):
+    return decide_route(state)
 
-# Set Mandatory Entry Point: resolve_permissions (Section 58)
-workflow.set_entry_point("resolve_permissions")
+def route_after_execution(state: GraphState):
+    return decide_execution(state)
 
-workflow.add_conditional_edges(
-    "resolve_permissions",
-    decide_permission,
-    {
-        "authorized": "router",
-        "authorization_denied": "format_response",
-    }
-)
+def build_graph():
+    workflow = StateGraph(GraphState)
+    workflow.add_node("router_node", router_node)
+    workflow.add_node("greeting", greeting_node)
+    workflow.add_node("unclear", unclear_node)
+    workflow.add_node("blocked_security", blocked_security_node)
+    workflow.add_node("enhance_query_node", enhance_query_node)
+    workflow.add_node("retrieve_context_node", retrieve_context_node)
+    workflow.add_node("generate_sql_node", generate_sql_node)
+    workflow.add_node("validate_sql_node", validate_sql_node)
+    workflow.add_node("rewrite_sql_node", rewrite_sql_node)
+    workflow.add_node("execute_sql_node", execute_sql_node)
+    workflow.add_node("format_response_node", format_response_node)
+    workflow.set_entry_point("router_node")
+    workflow.add_conditional_edges("router_node", route_after_router, {
+        "greeting": "greeting", 
+        "unclear": "unclear", 
+        "blocked_security": "blocked_security",
+        "text_to_sql": "enhance_query_node"
+    })
+    workflow.add_edge("greeting", END)
+    workflow.add_edge("unclear", END)
+    workflow.add_edge("blocked_security", END)
+    workflow.add_edge("enhance_query_node", "retrieve_context_node")
+    workflow.add_edge("retrieve_context_node", "generate_sql_node")
+    workflow.add_edge("generate_sql_node", "validate_sql_node")
+    workflow.add_conditional_edges("validate_sql_node", decide_validation, {
+        "valid": "execute_sql_node", 
+        "retry": "rewrite_sql_node", 
+        "unsupported": "format_response_node", 
+        "failed": "format_response_node"
+    })
+    workflow.add_edge("rewrite_sql_node", "validate_sql_node")
+    workflow.add_conditional_edges("execute_sql_node", route_after_execution, {
+        "success": "format_response_node", 
+        "retry": "rewrite_sql_node", 
+        "failed": "format_response_node"
+    })
+    workflow.add_edge("format_response_node", END)
+    return workflow.compile()
 
-# Add Conditional Edges from Router
-workflow.add_conditional_edges(
-    "router",
-    decide_route,
-    {
-        "greeting": "greeting",
-        "unclear": "unclear",
-        "current_retrieval": "current_retrieval",
-        "database_lookup_node": "database_lookup_node",
-        "sql_analytics": "sql_analytics",
-        "analytics_node": "analytics_node",
-        "forecast_node": "forecast_node",
-        "text_to_sql": "sql_analytics"
-    }
-)
-
-# Add Conditional Edges from Current Retrieval
-workflow.add_conditional_edges(
-    "current_retrieval",
-    decide_retrieval_result,
-    {
-        "success": "format_response",
-        "disambiguation": "format_response",
-        "sql_fallback": "sql_fallback"
-    }
-)
-
-workflow.add_conditional_edges(
-    "database_lookup_node",
-    decide_retrieval_result,
-    {
-        "success": "format_response",
-        "disambiguation": "format_response",
-        "sql_fallback": "sql_fallback"
-    }
-)
-
-# SQL Pipeline Flow
-workflow.add_edge("sql_analytics", "query_plan_builder")
-workflow.add_edge("sql_fallback", "query_plan_builder")
-workflow.add_edge("query_plan_builder", "generate_sql")
-workflow.add_edge("generate_sql", "validate_sql")
-
-workflow.add_conditional_edges(
-    "validate_sql",
-    decide_validation,
-    {
-        "valid": "execute_sql",
-        "retry": "analyze_sql_error",
-        "exhausted": "controlled_error"
-    }
-)
-
-workflow.add_conditional_edges(
-    "execute_sql",
-    decide_execution,
-    {
-        "success": "result_validation",
-        "retry": "analyze_sql_error",
-        "exhausted": "controlled_error"
-    }
-)
-
-# Self-Correction Retry Loop
-workflow.add_edge("analyze_sql_error", "regenerate_sql")
-workflow.add_edge("regenerate_sql", "validate_sql")
-
-# Final Branches
-workflow.add_edge("result_validation", "format_response")
-workflow.add_edge("controlled_error", "format_response")
-workflow.add_edge("analytics_node", "format_response")
-workflow.add_edge("forecast_node", "format_response")
-workflow.add_edge("greeting", END)
-workflow.add_edge("unclear", END)
-workflow.add_edge("format_response", END)
-
-# Compile Graph
-app = workflow.compile()
+app = build_graph()
 
 # ─── Public Invocation Entrypoint ──────────────────────────────────────────────
 
-def generate_follow_up_suggestions(question: str, sql_result: Any):
-    is_ta = any('\u0B80' <= c <= '\u0BFF' for c in (question or ""))
-    if is_ta:
-        return [
-            "கடந்த 10 ஆண்டுகளில் திருமுழுக்கு எண்ணிக்கை என்ன?",
-            "முதல் நற்கருணை எண்ணிக்கையில் ஏற்பட்ட மாற்றத்தை காட்டு",
-            "அடுத்த 10 ஆண்டுகளுக்கான கணிப்பை வழங்கவும்",
-        ]
-    suggestions = []
-    if isinstance(sql_result, list) and len(sql_result) > 0:
-        first_row = sql_result[0]
-        name = first_row.get("Member Name") or first_row.get("Family Head") or first_row.get("Family Name / Head") or first_row.get("full_name")
-        if name:
-            clean_name = re.sub(r'\(.*?\)', '', str(name)).strip()
-            suggestions.append(f"Show sacrament records for {clean_name}")
-            suggestions.append(f"Show baptism records for {clean_name}")
-            suggestions.append(f"Show family details for {clean_name}")
-
-    if not suggestions:
-        suggestions = [
-            "What was the number of baptisms each year for the last 10 years?",
-            "How has baptism changed over the last 10 years?",
-            "Based on the last 10 years of baptism records, how might the next 10 years look?",
-        ]
-
-    return suggestions[:4]
-
-
-def resolve_follow_up_context(question: str, history: list = None) -> tuple[str, dict]:
-    """
-    FOLLOW-UP CONTEXT RULE:
-    If the previous assistant/user turn identified a specific family, member, parish,
-    or family card, short follow-up queries (in English, Tamil, Tanglish) must inherit
-    the entity from the previous turn.
-    """
-    if not history or not question:
-        return question, {}
-
-    q_clean = question.strip()
-    is_anaphoric = False
-    anaphoric_patterns = [
-        r"^(?:அவர்களை|அவர்களின்|அவர்களுடைய|அவர்|அவரை|அவரின்|இவர்|இவர்களை|இவர்களின்)\b",
-        r"\b(?:list\s+them|show\s+them|list\s+members|show\s+the\s+members|give\s+their\s+details|show\s+their\s+baptism\s+records|who\s+are\s+they|give\s+details|tell\s+me\s+more|show\s+family\s+members|list\s+all\s+members)\b",
-        r"\b(?:avanga|avangala|avangaloda|avangaluku|avangalku|ivanga)\b",
-        r"^(?:அவர்களின்|அவர்களை)\s+(?:விவரங்களை\s+காட்டு|பட்டியல்\s*இடு|பட்டியலிடு|விவரம்|பதிவுகள்)",
-    ]
-    words = q_clean.split()
-    if any(re.search(pat, q_clean, re.IGNORECASE) for pat in anaphoric_patterns):
-        is_anaphoric = True
-    elif len(words) <= 4 and any(w in q_clean for w in ["பட்டியல்", "காட்டு", "விவரம்", "உறுப்பினர்கள்", "list", "show", "details"]):
-        from koinonia_assistant.rag.tamil_utils import extract_person_entity_from_multilingual_query
-        ent = extract_person_entity_from_multilingual_query(q_clean)
-        if not ent.get("original_name"):
-            is_anaphoric = True
-
-    if not is_anaphoric:
-        return question, {}
-
-    card_no = None
-    person_name = None
-
-    for msg in reversed(history):
-        content = msg.get("content", "")
-        m_card = re.search(r"\b([A-Z]{2,5}/\d{1,5})\b", content, re.IGNORECASE)
-        if m_card and not card_no:
-            card_no = m_card.group(1).upper()
-
-        m_head = re.search(r"\b(?:Family\s*Name|Family\s*of|பங்கு\s*உறுப்பினர்|குடும்பம்|குடும்ப\s*பெயர்)[:\s\*]+([A-Za-z\.\s]+?)(?:\*|\n|\(|,|$)", content, re.IGNORECASE)
-        if m_head and not person_name:
-            cand = m_head.group(1).strip()
-            if len(cand) >= 3 and not any(w in cand.lower() for w in ["family", "parish", "card"]):
-                person_name = cand
-
-        m_bold_name = re.search(r"\*\*([A-Za-z\.\s]{3,35})\*\*", content)
-        if m_bold_name and not person_name:
-            cand = m_bold_name.group(1).strip()
-            if not any(w in cand.lower() for w in ["family", "parish", "card", "members", "total"]):
-                person_name = cand
-
-        from koinonia_assistant.rag.tamil_utils import TAMIL_NAME_DICTIONARY
-        for tam_n in TAMIL_NAME_DICTIONARY:
-            if tam_n in content and not person_name:
-                person_name = TAMIL_NAME_DICTIONARY[tam_n]
-                break
-
-        if card_no or person_name:
-            break
-
-    if not card_no and not person_name:
-        return question, {}
-
-    entity_ref = f"{person_name} (Card: {card_no})" if (person_name and card_no) else (person_name or f"Card: {card_no}")
-
-    is_list_members = any(w in q_clean.lower() for w in ["பட்டியல்", "பட்டியலிடு", "உறுப்பினர்", "members", "list", "who"])
-    is_details = any(w in q_clean.lower() for w in ["விவரம்", "விவரங்கள்", "details", "info"])
-    is_baptism = any(w in q_clean.lower() for w in ["திருமுழுக்கு", "ஞானஸ்நான", "baptism"])
-    is_address = any(w in q_clean.lower() for w in ["முகவரி", "address", "where", "location"])
-    is_sacraments = any(w in q_clean.lower() for w in ["sacrament", "sacraments", "சாக்ரமென்ட்"])
-
-    from koinonia_assistant.rag.tamil_utils import is_tamil
-    is_ta = is_tamil(q_clean)
-
-    if is_ta:
-        if is_baptism:
-            resolved_q = f"{entity_ref} குடும்பத்தினரின் திருமுழுக்குப் பதிவுகள்" if "குடும்ப" in q_clean or not is_list_members else f"{entity_ref} திருமுழுக்கு நிலை என்ன?"
-        elif is_list_members:
-            resolved_q = f"{entity_ref} குடும்ப உறுப்பினர்களை பட்டியல் இடு"
-        elif is_address:
-            resolved_q = f"{entity_ref} முகவரி என்ன?"
-        elif is_sacraments:
-            resolved_q = f"{entity_ref} அருட்சாதன விவரங்கள்"
-        else:
-            resolved_q = f"{entity_ref} குடும்ப விவரங்கள்"
-    else:
-        if is_baptism:
-            resolved_q = f"Show baptism records of {entity_ref}"
-        elif is_list_members:
-            resolved_q = f"Show all family members of {entity_ref}"
-        elif is_address:
-            resolved_q = f"What is {entity_ref}'s address?"
-        elif is_sacraments:
-            resolved_q = f"Show sacrament details for {entity_ref}"
-        else:
-            resolved_q = f"Show family details of {entity_ref}"
-
-    inherited = {
-        "card_no": card_no,
-        "person_name": person_name,
-        "entity_ref": entity_ref,
-        "resolved_query": resolved_q,
-    }
-    return resolved_q, inherited
-
-
-def run_query(
-    question: str,
-    history: list = None,
-    user_role: str = "Bishop",
-    user_parish: str = None,
-    user_diocese: str = None,
-    request_id: str = None,
-    user_id: str = None,
-    input_mode: str = "chat",
-    original_transcript: str = None,
-) -> dict:
-    """
-    Unified Server-First Entrypoint:
-    - Preserves `original_query` EXACTLY as entered (Sections 24–27, 48: NEVER converts Tamil to Tanglish).
-    - Preserves `original_transcript` for voice queries (Rule 2).
-    - Executes `resolve_permissions` as Step 0 inside LangGraph BEFORE any database retrieval (Sections 50–76).
-    """
-    import uuid
-    import time
-    from koinonia_assistant.rag.tamil_utils import detect_query_language
-
-    start_ts = time.time()
-    req_id = request_id or str(uuid.uuid4())
-    trace_id = f"lg-trace-{req_id[:12]}"
-    original_question = (question or "").strip()
-    detected_lang = detect_query_language(original_question)
-
-    effective_question, inherited_entity = resolve_follow_up_context(original_question, history)
-    if inherited_entity:
-        print(f"[FollowUpContext] Anaphoric query resolved -> '{effective_question}' (Inherited: {inherited_entity})")
-
-    print("\n" + "=" * 76)
-    print(f"[BACKEND] REQUEST RECEIVED | request_id={req_id} | trace_id={trace_id} | lang={detected_lang} | input_mode={input_mode}")
-    print(f"[BACKEND] Original Query (Immutable): '{original_question}' | Role: {user_role} | Parish: {user_parish}")
-    print("=" * 76)
-
-    # Embed original_question & log query history to Postgres (without overwriting original_question!)
-    embedding = embed_text(original_question)
-    history_id = log_query_history(original_question, "", embedding)
-
-    # Pre-resolve intent & authorization metadata so LangSmith Root Input tab shows all search/query fields
-    from koinonia_assistant.rag.analytics_engine import (
-        classify_langgraph_intent,
-        build_authorization_context,
-        check_explicit_scope_violation,
-    )
-    pre_intent = classify_langgraph_intent(effective_question)
-    pre_auth = build_authorization_context(
-        user_id=user_id or "User",
-        user_role=user_role or "Parishioner",
-        user_parish=user_parish,
-        user_diocese=user_diocese,
-    )
-    pre_scope_check = check_explicit_scope_violation(effective_question, pre_auth, detected_language=detected_lang)
-
-    # Build initial LangGraph state with `question` and `original_query` strictly equal to `original_question`
-    initial_state: GraphState = {
-        "question": effective_question,
-        "original_query": original_question,
-        "input_mode": input_mode,
-        "original_transcript": original_transcript or (original_question if input_mode == "voice" else None),
-        "detected_language": detected_lang,
-        "normalized_query": pre_intent.get("normalized_query", ""),
-        "intent_query": pre_intent.get("intent_query", pre_intent.get("intent", "")),
-        "entity_query": pre_intent.get("entity_query", pre_intent.get("person_name") or ""),
-        "canonical_terms": pre_intent.get("canonical_terms", {}),
-        "final_response_language": "ta" if detected_lang == "ta" else "en",
+def run_query(question: str, history: list = None, reference_text: str = None, user_role: str = "Parish Priest", user_parish: str = None, user_vicariate: str = None, user_diocese: str = None, user_parishes: list = None, user_member_id: str = None, user_email: str = None, **kwargs) -> dict:
+    app = build_graph()
+    
+    # 1. Embed query to check if it's already in history
+    embedding = embed_text(question)
+    
+    # Log query history to Postgres (initializes thread, correctness_flag defaults to NULL)
+    history_id = log_query_history(question, "", embedding)
+    
+    # 2. Run graph execution
+    initial_state = {
+        "question": question,
         "history": history or [],
+        "reference_text": reference_text or "",
         "route": "",
-        "enhanced_query": pre_intent.get("normalized_query", ""),
-        "relevant_tables": ["tabMember", "tabFamily", "tabBaptism", "tabCommunion", "tabConfirmation", "tabMarriage"],
+        "enhanced_query": "",
+        "relevant_tables": [],
         "relevant_fields": [],
         "few_shot_examples": "",
         "query_embedding": embedding,
@@ -3023,163 +2368,220 @@ def run_query(
         "retry_count": 0,
         "final_answer": "",
         "history_id": history_id,
-        "user_id": user_id or "User",
         "user_role": user_role,
         "user_parish": user_parish,
+        "user_vicariate": user_vicariate,
         "user_diocese": user_diocese,
-        "authorization_context": pre_auth,
-        "authorization_check": "PRE_RETRIEVAL_SCOPE_ENFORCEMENT",
-        "authorization_result": pre_scope_check.get("authorization_result", "AUTHORIZED"),
-        "sql_validation_result": "PENDING_VALIDATION",
-        "authorized_record_count": 0,
-        "request_id": req_id,
-        "classified_intent": pre_intent.get("intent", ""),
-        "speed_tier": pre_intent.get("speed_tier", "FAST"),
-        "intent_info": pre_intent,
-        "deterministic_reply": None,
-        "chart_data": None,
-        "disambiguation": None,
-        "suggested_questions": None,
-        "analysis_metadata": None,
-        # Section 32: Retrieval Fallback State
-        "retrieval_status": None,
-        "retrieval_failed": False,
-        "sql_fallback_required": False,
-        "sql_fallback_attempted": False,
-        "sql_fallback_result": None,
-        # Query Plan & Validation State
-        "query_plan": None,
-        "query_plan_valid": False,
-        "query_plan_validation_error": None,
-        "sql_valid": False,
-        "database_result": None,
-        # Section 11: SQL Self-Correction & Retry State
-        "sql_retry_count": 0,
-        "sql_max_retries": 2,
-        "sql_retry_reason": None,
-        "sql_previous_query": None,
-        "sql_error": None,
-        "sql_error_type": None,
-        "sql_correction_attempt": False,
-        "sql_retry_exhausted": False,
+        "user_parishes": user_parishes or [],
+        "user_member_id": user_member_id,
+        "user_email": user_email
     }
-
-    # Guarantee LangSmith trace capture with original_query & authorization metadata
-    configure_langsmith()
-    callbacks = []
-    try:
-        from langchain_core.tracers import LangChainTracer
-        tracer = LangChainTracer(project_name=os.environ.get("LANGCHAIN_PROJECT", "koinonia_assistant"))
-        callbacks.append(tracer)
-    except Exception as te:
-        print(f"[LangSmith] Tracer init warning: {te}")
-
-    config = {
-        "callbacks": callbacks,
-        "run_name": "LangGraph",
+    
+    langsmith_config = {
+        "run_name": f"Koinonia_RAG_Pipeline: {question[:40]}",
         "metadata": {
-            "request_id": req_id,
-            "trace_id": trace_id,
-            "original_query": original_question,
-            "detected_language": detected_lang,
-            "user_id": user_id or "User",
             "user_role": user_role,
-            "user_parish": user_parish or "Diocesan Scope",
+            "user_diocese": user_diocese,
+            "user_parish": user_parish,
+            "question": question
         },
-    } if callbacks else {"run_name": "LangGraph"}
-
-    # Execute LangGraph Pipeline (starts at resolve_permissions -> router -> ...)
-    final_state = app.invoke(initial_state, config=config)
-
-    processing_time = round(time.time() - start_ts, 3)
-    final_reply = final_state.get("final_answer", "Error resolving request.")
-    raw_sql_res = final_state.get("sql_result") or []
-    gen_sql = final_state.get("generated_sql", "")
-    c_intent = final_state.get("classified_intent") or "GENERAL_DATABASE_QUERY"
-    s_tier = final_state.get("speed_tier") or "FAST"
-    chart_payload = final_state.get("chart_data")
-    disambig = final_state.get("disambiguation")
-    suggested_qs = final_state.get("suggested_questions") or generate_follow_up_suggestions(original_question, raw_sql_res)
-
-    # Strip internal backend database ID columns from UI display rows (keep IDs backend-only)
-    BACKEND_ONLY_ID_COLS = {
-        "member_id", "Member ID", "member id",
-        "family_id", "Family ID", "family id",
-        "name", "id", "ID", "is_family_head", "parish_bcc_id"
+        "tags": [user_role, user_diocese or "Global"]
     }
-    sql_res = []
-    if isinstance(raw_sql_res, list):
-        for row in raw_sql_res:
-            if isinstance(row, dict):
-                cleaned_row = {
-                    k: v for k, v in row.items()
-                    if k not in BACKEND_ONLY_ID_COLS and not str(k).lower().endswith("_id")
-                }
-                if cleaned_row:
-                    sql_res.append(cleaned_row)
-            else:
-                sql_res.append(row)
-    meta = final_state.get("analysis_metadata") or {}
-    auth_ctx_out = final_state.get("authorization_context") or {}
+    
+    try:
+        final_state = app.invoke(initial_state, config=langsmith_config)
+    except Exception as e:
+        print(f"[run_query] Graph execution error: {e}")
+        return {"reply": "Sorry, I encountered an error while processing your request.", "generated_sql": ""}
 
-    hist_period = None
-    forecast_period = None
-    forecast_method = None
-    if meta and meta.get("datasets"):
-        first_ds = next(iter(meta["datasets"].values()), {})
-        hist_period = f"{first_ds.get('start_year')}-{first_ds.get('end_year')}"
-        f_obj = first_ds.get("forecast") or {}
-        forecast_period = f_obj.get("forecast_period")
-        forecast_method = f_obj.get("method")
+    generated_sql = final_state.get("generated_sql", "")
+    
+    # Update the query history in postgres with the actual generated SQL
+    if history_id and generated_sql:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(**PG_CONFIG)
+            with conn.cursor() as cur:
+                # Only update if the row is not already marked as correct (correctness_flag is not 1)
+                cur.execute("UPDATE koinonia_query_history SET generated_sql = %s WHERE id = %s AND (correctness_flag IS NULL OR correctness_flag != 1)", (generated_sql, history_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[run_query] Failed to update query history SQL: {e}")
 
-    print("=" * 76)
-    print(
-        f"[BACKEND] RESPONSE READY | request_id={req_id} | trace_id={trace_id} "
-        f"| lang={final_state.get('detected_language')} | intent={c_intent} "
-        f"| scope={auth_ctx_out.get('scope_name')} | auth_res={final_state.get('authorization_result')} "
-        f"| time={processing_time}s"
+    suggested = final_state.get("suggested_questions") or generate_suggested_questions(
+        question, 
+        user_role=user_role, 
+        user_diocese=user_diocese,
+        user_parish=user_parish,
+        user_vicariate=user_vicariate
     )
-    print("=" * 76)
-
     return {
-        "request_id": req_id,
-        "trace_id": trace_id,
-        "original_query": final_state.get("original_query", original_question),
-        "detected_language": final_state.get("detected_language", detected_lang),
-        "normalized_query": final_state.get("normalized_query", ""),
-        "canonical_terms": final_state.get("canonical_terms", {}),
-        "final_response_language": final_state.get("final_response_language", "ta" if detected_lang == "ta" else "en"),
-        "intent": c_intent,
-        "speed_tier": s_tier,
-        "status": "success",
-        "authorization_context": auth_ctx_out,
-        "authorization_check": final_state.get("authorization_check", "PRE_RETRIEVAL_SCOPE_ENFORCEMENT"),
-        "authorization_result": final_state.get("authorization_result", "AUTHORIZED"),
-        "sql_validation_result": final_state.get("sql_validation_result", "PASSED_ALL_SECURITY_CHECKS"),
-        "authorized_record_count": final_state.get("authorized_record_count", 0),
-        "scope_type": auth_ctx_out.get("scope_type"),
-        "scope_id": auth_ctx_out.get("scope_id"),
-        "scope_name": auth_ctx_out.get("scope_name"),
-        "reply": final_reply,
-        "answer": final_reply,
-        "final_answer": final_reply,
-        "generated_sql": gen_sql,
-        "sql_fallback_attempted": final_state.get("sql_fallback_attempted"),
-        "sql_fallback_required": final_state.get("sql_fallback_required"),
-        "retrieval_status": final_state.get("retrieval_status"),
-        "query_plan": final_state.get("query_plan"),
-        "sql_retry_count": final_state.get("sql_retry_count"),
-        "data": sql_res,
-        "chart": chart_payload,
-        "disambiguation": disambig,
-        "suggested_questions": suggested_qs,
-        "analysis_type": "forecast" if c_intent == "FORECAST" else ("historical" if c_intent in ("HISTORICAL_ANALYSIS", "STATISTICAL_ANALYSIS", "TREND_ANALYSIS", "COMPARISON") else "operational"),
-        "historical_period": hist_period,
-        "forecast_period": forecast_period,
-        "method": forecast_method,
-        "processing_time": processing_time,
-        "query_id": history_id,
-        "input_mode": final_state.get("input_mode", input_mode),
-        "original_transcript": final_state.get("original_transcript", original_transcript),
+        "reply": final_state.get("final_answer", ""),
+        "answer": final_state.get("final_answer", ""),
+        "generated_sql": generated_sql,
+        "sql_result": final_state.get("sql_result"),
+        "data": final_state.get("sql_result") or [],
+        "suggested_questions": suggested,
+        "request_id": kwargs.get("request_id"),
+        "error_message": final_state.get("error_message", "")
     }
 
+
+def generate_suggested_questions(
+    question: str, 
+    user_role: str = "Parish Priest", 
+    user_diocese: str = "Salem",
+    user_parish: str = None,
+    user_vicariate: str = None
+) -> list:
+    """Generates 3-4 highly relevant contextual follow-up questions using AI strictly answerable from available church database DocTypes and bounded by user's role jurisdiction."""
+    if not question or not question.strip():
+        return []
+    
+    parish_info = f"Assigned Parish: {user_parish}" if user_parish else "No single parish assigned"
+    vicariate_info = f"Assigned Vicariate: {user_vicariate}" if user_vicariate else ""
+    
+    try:
+        system_instruction = (
+            "You are an intelligent Catholic Parish & Diocesan assistant for KOINONIA.\n"
+            "Given the user's current query and context, generate 3 to 4 short, clickable FOLLOW-UP SEARCH PROMPTS that the user would want to ask next to explore related church data.\n\n"
+            "CRITICAL INSTRUCTION — USER SEARCH PROMPTS ONLY (NEVER ASK QUESTIONS TO THE USER):\n"
+            "- Every suggestion MUST be an actionable search query that the USER sends to the assistant (e.g. 'Show top 5 parishes with highest members', 'Compare male vs female members in my diocese', 'Count families in each parish', 'List baptisms in 2024').\n"
+            "- NEVER ASK CLARIFICATION QUESTIONS TO THE USER! Never generate questions like 'Which sacrament should be graphed?', 'Specify year range?', 'Do you want all dioceses?', 'Include only active parishes?'. These are strictly forbidden.\n"
+            "- Every prompt must be a complete, ready-to-execute user question that searches the database.\n\n"
+            f"USER JURISDICTION & ROLE CONTEXT:\n"
+            f"- User Role: {user_role}\n"
+            f"- Diocese: {user_diocese or 'Not specified'}\n"
+            f"- {parish_info}\n"
+            f"- {vicariate_info}\n\n"
+            "STRICT ROLE-BASED ACCESS LIMITS (Crucial: NEVER suggest questions outside the user's jurisdiction):\n"
+            "1. If User Role is 'Parish Priest':\n"
+            "   - The questions MUST be strictly scoped to their own parish ('in my parish').\n"
+            "   - Allowed: 'Count baptisms in my parish for 2024', 'Show families in my parish', 'Total members in my parish'.\n"
+            "   - FORBIDDEN: NEVER suggest diocese-wide census or searching other parishes.\n"
+            "2. If User Role is 'Vicar Forane' or 'Vicar General':\n"
+            "   - The questions MUST be scoped to their vicariate or controlled parishes ('in my vicariate', 'across parishes in my vicariate').\n"
+            "3. If User Role is 'Bishop', 'Chancellor', 'Curia', or 'Administrator':\n"
+            "   - The questions can be diocese-wide ('in my diocese', 'across parishes in diocese').\n"
+            "4. If User Role is 'Parishioner' or 'Member':\n"
+            "   - The questions MUST be personal/family scoped ('Show my family details', 'Parish patron saint').\n\n"
+            "STRICT DATABASE SCHEMA BOUNDARIES (You must ONLY suggest questions answerable from these 9 active DocTypes):\n"
+            "1. Parish & Diocesan Directory (DocTypes: tabDiocese, tabVicariate, tabParish)\n"
+            "2. Family & Parishioner Census (DocTypes: tabFamily, tabMember)\n"
+            "3. Sacramental Registers (DocTypes: tabBaptism, tabCommunion, tabConfirmation, tabMarriage, tabDeath)\n\n"
+            "FORBIDDEN TOPICS (NEVER suggest these because NO data exists in the database for them):\n"
+            "- DO NOT suggest events, diocesan events, parish feasts, calendar schedules, or mass timings.\n"
+            "- DO NOT suggest finances, donations, parish budget, collections, or accounts.\n"
+            "- DO NOT suggest sermons, homilies, catechism, or clergy transfer orders.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Return ONLY a valid JSON array of 3 or 4 short question strings.\n"
+            "2. Keep each question concise (under 8 words).\n"
+            "3. Ensure EVERY question is a direct user query searchable in the database.\n"
+            "4. Do NOT output markdown, backticks, or any explanation."
+        )
+        prompt = [
+            ("system", system_instruction),
+            ("human", f"User Question: '{question}'")
+        ]
+        resp = invoke_llm_with_rotation(prompt)
+        content = resp.content.strip()
+        
+        # Robust JSON array extraction
+        match = re.search(r"\[\s*.*?\s*\]", content, re.DOTALL)
+        if match:
+            content = match.group(0)
+            
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and len(parsed) > 0:
+            return [str(q).strip().strip('"').strip("'") for q in parsed if str(q).strip()][:4]
+    except Exception as e:
+        print(f"[generate_suggested_questions] Warning: {e}")
+    
+    # Fully dynamic fallback using keyword matching and entity extraction with role scoping
+    q_low = question.lower()
+    
+    # Scope determination based on role
+    if user_role in ["Bishop", "Chancellor", "Curia", "Administrator", "System Manager"]:
+        geo_scope = f"{user_diocese} Diocese" if user_diocese else "my diocese"
+    elif user_role in ["Vicar Forane", "Vicar General"]:
+        geo_scope = "my vicariate"
+    else:
+        geo_scope = f"{user_parish}" if user_parish else "my parish"
+    
+    # 1. Parse Year
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", q_low)
+    year = year_match.group(0) if year_match else "2026"
+    prev_year = str(int(year) - 1) if year.isdigit() else "2025"
+    
+    # 2. Parse Sacrament
+    sacraments = ["baptism", "marriage", "communion", "confirmation", "death", "sacrament"]
+    sacrament = "sacrament"
+    for s in sacraments:
+        if s in q_low:
+            sacrament = s
+            break
+            
+    # 3. Dynamic Fallbacks
+    if sacrament != "sacrament":
+        return [
+            f"Breakdown {sacrament}s by month in {geo_scope} for {year}",
+            f"Compare {year} {sacrament}s with {prev_year} in {geo_scope}",
+            f"Give this {sacrament} record in graph",
+            f"List {sacrament}s with parents names in {geo_scope}"
+        ]
+        
+    if "family" in q_low or "member" in q_low:
+        names = re.findall(r"\b[A-Z][a-z]+\b", question)
+        name_str = f" for {names[0]}" if names else ""
+        return [
+            f"Show family registration details{name_str}",
+            f"Count members by gender in {geo_scope}",
+            f"Show families by BCC unit in {geo_scope}",
+            "Who is the family head?"
+        ]
+        
+    if "diocese" in q_low or "parish" in q_low or "vicariate" in q_low:
+        if user_role in ["Bishop", "Chancellor", "Curia", "Administrator", "System Manager"]:
+            return [
+                f"List all parishes in {geo_scope}",
+                f"Show total families in each parish of {geo_scope}",
+                f"Count members in each parish of {geo_scope}",
+                "Compare member counts across dioceses"
+            ]
+        elif user_role in ["Vicar Forane", "Vicar General"]:
+            return [
+                "List parishes in my vicariate",
+                "Total members in my controlled parishes",
+                "Show families in my controlled parishes",
+                "Total members in my diocese"
+            ]
+        else:
+            return [
+                f"Show families in {geo_scope}",
+                f"Total members in {geo_scope}",
+                f"Show total counts of all sacraments in {geo_scope}",
+                f"List active BCC units in {geo_scope}"
+            ]
+        
+    if user_role in ["Bishop", "Chancellor", "Curia", "Administrator", "System Manager"]:
+        return [
+            f"Total members in {geo_scope}",
+            f"Show total counts of all sacraments in {geo_scope}",
+            f"List all parishes in {geo_scope}",
+            f"Show total families in each parish of {geo_scope}"
+        ]
+    elif user_role in ["Vicar Forane", "Vicar General"]:
+        return [
+            "Total members in my controlled parishes",
+            "Show total counts of all sacraments in my vicariate",
+            "List parishes in my vicariate",
+            "Show families in my parish"
+        ]
+    else:
+        return [
+            f"Total members in {geo_scope}",
+            f"Show total counts of all sacraments in {geo_scope}",
+            f"Show families in {geo_scope}",
+            f"Count baptisms in {geo_scope}"
+        ]
