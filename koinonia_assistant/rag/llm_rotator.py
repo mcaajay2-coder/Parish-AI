@@ -191,9 +191,8 @@ class LLMRotator:
                         f"[LLMRotator] Attempt {attempt+1}/{max_attempts}: Key {masked_key} hit rate limit on model '{active_model}'. "
                         f"Rotating to next key..."
                     )
-                    self._mark_key_cooldown(key, duration=60.0, error_str=err_str)
+                    self._mark_key_cooldown(key, duration=60.0)
                     last_error = e
-                    time.sleep(0.3)  # brief pause before next attempt
                     continue
                 else:
                     logger.error(f"[LLMRotator] Error invoking {active_model} with key {masked_key}: {e}")

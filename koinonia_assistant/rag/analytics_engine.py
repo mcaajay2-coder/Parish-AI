@@ -460,7 +460,7 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
         ])
     )
     is_comparison = (
-        any(w in q_low for w in ["compare", "comparison", "versus", " vs ", "between"])
+        any(w in q_low for w in ["compare", "comparison", "versus", " vs ", "between", "across different", "across"])
         or (len(metrics) >= 2 and any(w in q_low for w in ["year", "trend", "last", "history", "historical", "statistics", "analyze", "analyse", "forecast"]))
     )
     is_trend = any(w in q_low for w in [
@@ -468,7 +468,8 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
         "slope", "year-over-year", "yoy", "how has"
     ])
     is_statistical = any(w in q_low for w in [
-        "statistics", "statistical", "average", "mean", "median", "variance", "volatility", "summary statistics"
+        "statistics", "statistical", "average", "avg", "mean", "median", "variance", "volatility",
+        "summary statistics", "distribution", "breakdown", "family size"
     ])
     is_historical = (
         bool(m_past)
@@ -488,21 +489,22 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
         "final_response_language": "en",
     }
 
-    if is_comparison and (is_historical or is_trend or is_forecast or len(metrics) >= 2):
-        if not metrics:
-            metrics = ["baptism", "confirmation"]
+    if is_comparison:
+        m_names = metrics if metrics else ["general_comparison"]
         tier = "LONG_RUNNING" if (is_forecast or len(metrics) >= 3 or years_back >= 15) else "ANALYTICAL"
         return {
             **base_meta,
-            "normalized_query": f"INTENT=COMPARISON | METRICS={','.join(metrics)} | PERIOD=LAST_{years_back}_YEARS",
+            "normalized_query": f"INTENT=COMPARISON | METRICS={','.join(m_names)} | PERIOD=LAST_{years_back}_YEARS",
             "intent_query": "COMPARISON",
-            "entity_query": f"METRICS={','.join(metrics)}",
+            "entity_query": f"METRICS={','.join(m_names)}",
             "intent": "COMPARISON",
             "speed_tier": tier,
             "metrics": metrics,
             "years_back": years_back,
             "forecast_horizon": forecast_horizon,
             "include_forecast": is_forecast,
+            "person_name": None,
+            "is_statistical": True,
         }
 
     if is_forecast:
@@ -520,6 +522,8 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             "years_back": years_back,
             "forecast_horizon": forecast_horizon or 10,
             "include_forecast": True,
+            "person_name": None,
+            "is_statistical": True,
         }
 
     if is_trend and (metrics or is_historical):
@@ -535,21 +539,24 @@ def classify_langgraph_intent(question: str) -> Dict[str, Any]:
             "metrics": metrics,
             "years_back": years_back,
             "forecast_horizon": 0,
+            "person_name": None,
+            "is_statistical": True,
         }
 
-    if is_statistical and (metrics or is_historical):
-        if not metrics:
-            metrics = ["baptism"]
+    if is_statistical:
+        m_names = metrics if metrics else ["general_statistics"]
         return {
             **base_meta,
-            "normalized_query": f"INTENT=STATISTICAL_ANALYSIS | METRIC={metrics[0]} | PERIOD=LAST_{years_back}_YEARS",
+            "normalized_query": f"INTENT=STATISTICAL_ANALYSIS | METRIC={m_names[0]} | PERIOD=LAST_{years_back}_YEARS",
             "intent_query": "STATISTICAL_ANALYSIS",
-            "entity_query": f"METRIC={metrics[0]}",
+            "entity_query": f"METRIC={m_names[0]}",
             "intent": "STATISTICAL_ANALYSIS",
             "speed_tier": "ANALYTICAL",
             "metrics": metrics,
             "years_back": years_back,
             "forecast_horizon": 0,
+            "person_name": None,
+            "is_statistical": True,
         }
 
     if is_historical and metrics:

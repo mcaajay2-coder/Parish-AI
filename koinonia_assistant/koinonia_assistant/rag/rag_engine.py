@@ -915,6 +915,13 @@ def router_node(state: GraphState) -> GraphState:
         }
 
     if c_intent in ("HISTORICAL_ANALYSIS", "TREND_ANALYSIS", "COMPARISON"):
+        metrics = intent_info.get("metrics") or []
+        # If it is a demographic, BCC, or family comparison (not yearly sacrament time-series), route to sql_analytics!
+        if c_intent == "COMPARISON" and not any(m in ["baptism", "communion", "confirmation", "marriage"] for m in metrics):
+            return {
+                **common_state,
+                "route": "sql_analytics",
+            }
         return {
             **common_state,
             "route": "analytics_node",
@@ -929,12 +936,13 @@ def router_node(state: GraphState) -> GraphState:
 
     is_stat = (
         intent_info.get("is_statistical")
-        or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS")
+        or c_intent in ("MEMBER_STATISTICS", "FAMILY_STATISTICS", "SACRAMENT_STATISTICS", "BCC_STATISTICS", "COMPARISON", "STATISTICAL_ANALYSIS")
         or (c_intent == "COUNT" and not is_record_lookup)
         or (bool(stat_plan) and not is_record_lookup)
         or any(w in q for w in [
             "how many", "count of", "total members", "total families", "distribution",
-            "by gender", "age-wise", "above 60", "below 20", "under 18", "each year", "each bcc"
+            "by gender", "age-wise", "above 60", "below 20", "under 18", "each year", "each bcc",
+            "average", "avg", "compare", "comparison", "family size", "across different"
         ])
     )
 

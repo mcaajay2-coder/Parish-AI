@@ -17,7 +17,13 @@ RESERVED_GENERIC_WORDS = {
     # Follow-up pronouns & anaphoric words (MUST NEVER be extracted as literal person names)
     'them', 'they', 'their', 'theirs', 'him', 'her', 'his', 'he', 'she', 'it', 'this', 'these', 'those',
     'avanga', 'avangala', 'avangaloda', 'avangaluku', 'avangalku', 'avaru', 'avar', 'ivanga', 'ivangala', 'ivangaloda',
-    'pannu', 'sol', 'sollu', 'kaatu', 'kaatunga', 'kudunga'
+    'pannu', 'sol', 'sollu', 'kaatu', 'kaatunga', 'kudunga',
+    # Analytical, comparative, and aggregation words (MUST NEVER be extracted as person names)
+    'compare', 'comparison', 'versus', 'vs', 'average', 'avg', 'mean', 'median',
+    'size', 'across', 'different', 'unit', 'units', 'distribution', 'rate', 'ratio',
+    'percentage', 'trend', 'growth', 'breakdown', 'statistics', 'statistical',
+    'forecast', 'predict', 'projection', 'group', 'groups', 'cell', 'cells',
+    'zone', 'zones', 'bracket', 'brackets', 'category', 'categories'
 }
 
 # Domain & Intent Spelling/Typo Correction Map (Sections 1, 2, 6, 10)
@@ -513,9 +519,9 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
 
     # 1. Detect Statistical / Aggregate intent keywords OR age expressions
     has_count_kw = bool(re.search(
-        r'\b(?:how\s+many|number\s+of|count\s+of|count|total\s+number|total\s+count|total|how\s+much|breakdown|distribution|ratio|percentage|statistics|stats|summary)\b',
+        r'\b(?:how\s+many|number\s+of|count\s+of|count|total\s+number|total\s+count|total|how\s+much|breakdown|distribution|ratio|percentage|statistics|stats|summary|average|avg|mean|median|compare|comparison|versus|vs|size|across)\b',
         q_clean
-    ) or any(k in q_clean for k in ['எத்தனை', 'மொத்தம்', 'எண்ணிக்கை', 'புள்ளிவிவரம்', 'விகிதம்', 'பகிர்வு', 'கூட்டுத்தொகை', 'வாரியாக']))
+    ) or any(k in q_clean for k in ['எத்தனை', 'மொத்தம்', 'எண்ணிக்கை', 'புள்ளிவிவரம்', 'விகிதம்', 'பகிர்வு', 'கூட்டுத்தொகை', 'வாரியாக', 'சராசரி', 'ஒப்பிடு']))
 
     age_filter_raw = extract_age_filter(query_text)
 
@@ -527,7 +533,10 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
     has_both_gender = (has_women and has_men) or bool(re.search(r'\b(?:men\s+and\s+women|male\s+and\s+female|boys\s+and\s+girls|gender[\s\-]*wise|by\s+gender|gender\s+count|gender\s+breakdown|gender)\b', q_clean) or 'பாலின வாரியாக' in q_clean or 'பாலினம்' in q_clean or ('ஆண்கள்' in q_clean and 'பெண்கள்' in q_clean))
 
     # 3. Detect BCC / Anbiyam dimension
-    has_bcc_wise = bool(re.search(r'\b(?:in\s+each\s+bcc|in\s+each\s+anbiyam|each\s+bcc|each\s+anbiyam|bcc[\s\-]*wise|anbiyam[\s\-]*wise|per\s+bcc|per\s+anbiyam|by\s+bcc|by\s+anbiyam|every\s+bcc|every\s+anbiyam)\b', q_clean) or any(k in q_clean for k in ['அன்பிய வாரியாக', 'ஒவ்வொரு அன்பியத்திலும்', 'அன்பியம் வாரியாக']))
+    has_bcc_wise = bool(re.search(
+        r'\b(?:in\s+each\s+bcc|in\s+each\s+anbiyam|each\s+bcc|each\s+anbiyam|bcc[\s\-]*wise|anbiyam[\s\-]*wise|per\s+bcc|per\s+anbiyam|by\s+bcc|by\s+anbiyam|every\s+bcc|every\s+anbiyam|across\s+(?:different\s+)?(?:bcc|anbiyam)(?:\s+units?)?|(?:different\s+)?(?:bcc|anbiyam)\s+units?|across\s+bccs?|across\s+anbiyams?)\b',
+        q_clean
+    ) or any(k in q_clean for k in ['அன்பிய வாரியாக', 'ஒவ்வொரு அன்பியத்திலும்', 'அன்பியம் வாரியாக']))
     anbiyam_filter = None
     if not has_bcc_wise:
         m_anb = re.search(r"\b(?:in|at|of|for)\s+([A-Za-z0-9\s\.\'\"]+?)\s+(?:anbiyam|bcc)\b", q_clean)
@@ -560,22 +569,31 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
     year_filter = int(m_yr.group(1)) if m_yr else None
 
     # 5. Detect Family entity
-    has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை']))
+    has_family = bool(re.search(r'\b(?:families|family\s+count|households|household\s+count|family\s+size|family)\b', q_clean) or any(k in q_clean for k in ['குடும்பங்கள்', 'குடும்ப எண்ணிக்கை', 'குடும்ப']))
 
     # 6. Detect Member entity
     has_member = bool(re.search(r'\b(?:members?|membrs?|parishioners?|people|persons?|population|strength|census)\b', q_clean) or any(k in q_clean for k in ['உறுப்பினர்கள்', 'பங்குமக்கள்', 'மக்கள்', 'நபர்கள்', 'நபர்']))
 
+    has_avg = bool(re.search(r'\b(?:average|avg|mean|median|size|family\s+size)\b', q_clean) or 'சராசரி' in q_clean)
+    has_compare = bool(re.search(r'\b(?:compare|comparison|versus|vs|across)\b', q_clean) or 'ஒப்பிடு' in q_clean)
+
     # If neither count keyword nor statistical trigger nor age condition exists, return None
-    if not (has_count_kw or age_filter_raw or has_bcc_wise or has_year_wise or m_sac_count or (has_sacrament and year_filter)):
+    if not (has_count_kw or age_filter_raw or has_bcc_wise or has_year_wise or m_sac_count or (has_sacrament and year_filter) or has_compare or has_avg):
         return None
 
-    # Determine Entity
+    # Determine Entity & Intent
     if m_sac_count:
         entity = 'MEMBER'
         intent = 'MEMBER_STATISTICS'
     elif has_sacrament:
         entity = 'BAPTISM' if has_baptism else ('COMMUNION' if has_communion else ('CONFIRMATION' if has_confirmation else ('MARRIAGE' if has_marriage else 'SACRAMENT')))
         intent = 'SACRAMENT_STATISTICS'
+    elif (has_family or 'family' in q_clean) and (has_avg or has_compare or not has_member):
+        entity = 'FAMILY'
+        intent = 'COMPARISON' if has_compare else 'FAMILY_STATISTICS'
+    elif has_compare:
+        entity = 'MEMBER'
+        intent = 'COMPARISON'
     elif has_family and not has_member and not age_filter_raw and not has_women and not has_men:
         entity = 'FAMILY'
         intent = 'FAMILY_STATISTICS'
@@ -612,12 +630,14 @@ def build_structured_query_plan(query_text: str, user_parish: str = None) -> Opt
     elif year_filter:
         filters["year"] = year_filter
 
+    metric = "AVG" if has_avg else "COUNT"
+
     return {
         "is_statistical": True,
         "intent": intent,
         "entity_type": entity,
         "entity": entity,
-        "metric": "COUNT",
+        "metric": metric,
         "filters": filters,
         "group_by": group_by,
         "target_scope": "AUTHORIZED_PARISH",

@@ -443,16 +443,18 @@ ORDER BY FIELD(`gender`, 'Female', 'Male', 'Other');"""
 
     # ── 4. BCC / ANBIYAM DISTRIBUTION (group_by == "BCC") ───────────────────
     if group_by == "BCC":
+        order_col = "`avg_family_size` DESC" if metric == "AVG" else "`total_members` DESC"
         sql = f"""SELECT 
     COALESCE(NULLIF(f.parish_bcc_id, ''), 'Unassigned') AS `bcc`,
+    COUNT(DISTINCT f.name) AS `total_families`,
     COUNT(m.name) AS `total_members`,
-    COUNT(DISTINCT f.name) AS `total_families`
+    ROUND(COUNT(m.name) / NULLIF(COUNT(DISTINCT f.name), 0), 2) AS `avg_family_size`
 FROM `tabFamily` f
 LEFT JOIN `tabMember` m ON m.family_id = f.name {age_sql_cond}
 WHERE {p_cond_f}
 GROUP BY f.parish_bcc_id
-ORDER BY `total_members` DESC;"""
-        expl = f"Aggregating member and family distribution by BCC for {parish or 'authorized parish'}"
+ORDER BY {order_col};"""
+        expl = f"Aggregating member, family, and average family size distribution by BCC for {parish or 'authorized parish'}"
         return sql, expl
 
     # ── 5. SACRAMENTS BY YEAR (group_by == "YEAR") ──────────────────────────
@@ -966,32 +968,56 @@ WHERE {p_cond};"""
     if group_by == "BCC":
         tot_m = sum(int(r.get("total_members", 0)) for r in sql_result)
         tot_f = sum(int(r.get("total_families", 0)) for r in sql_result)
+        avg_overall = round(tot_m / tot_f, 2) if tot_f else 0.0
+        has_avg_size = any("avg_family_size" in r for r in sql_result)
 
         if is_ta:
-            lines = [
-                f"### 📊 {scope_name} — அன்பிய வாரியான உறுப்பினர்கள் மற்றும் குடும்பங்கள் விவரம்\n",
-                "| # | அன்பியம் (BCC) | உறுப்பினர்கள் | குடும்பங்கள் |",
-                "| :--- | :--- | :--- | :--- |"
-            ]
-            for idx, r in enumerate(sql_result, 1):
-                lines.append(f"| {idx} | **{r.get('bcc')}** | {r.get('total_members')} | {r.get('total_families')} |")
-            lines.append(f"| | **மொத்தம்** | **{tot_m}** | **{tot_f}** |\n")
-            lines.append(f"**{scope_name}** பங்கில் உள்ள அன்பியங்கள் வாரியான விவரம் மேலே அட்டவணையில் கொடுக்கப்பட்டுள்ளது.{age_coverage_note}")
+            if has_avg_size:
+                lines = [
+                    f"### 📊 {scope_name} — அன்பிய வாரியான குடும்ப அளவு மற்றும் விநியோகம்\n",
+                    "| # | அன்பியம் (BCC) | குடும்பங்கள் | உறுப்பினர்கள் | சராசரி குடும்ப அளவு |",
+                    "| :--- | :--- | :--- | :--- | :--- |"
+                ]
+                for idx, r in enumerate(sql_result, 1):
+                    lines.append(f"| {idx} | **{r.get('bcc')}** | {r.get('total_families')} | {r.get('total_members')} | **{r.get('avg_family_size', '-')}** |")
+                lines.append(f"| | **மொத்தம் / சராசரி** | **{tot_f}** | **{tot_m}** | **{avg_overall}** |\n")
+                lines.append(f"**{scope_name}** பங்கில் அன்பியங்கள் வாரியான குடும்ப அளவு மற்றும் விநியோகம் மேலே உள்ள அட்டவணையில் காட்டப்பட்டுள்ளது.{age_coverage_note}")
+            else:
+                lines = [
+                    f"### 📊 {scope_name} — அன்பிய வாரியான உறுப்பினர்கள் மற்றும் குடும்பங்கள் விவரம்\n",
+                    "| # | அன்பியம் (BCC) | உறுப்பினர்கள் | குடும்பங்கள் |",
+                    "| :--- | :--- | :--- | :--- |"
+                ]
+                for idx, r in enumerate(sql_result, 1):
+                    lines.append(f"| {idx} | **{r.get('bcc')}** | {r.get('total_members')} | {r.get('total_families')} |")
+                lines.append(f"| | **மொத்தம்** | **{tot_m}** | **{tot_f}** |\n")
+                lines.append(f"**{scope_name}** பங்கில் உள்ள அன்பியங்கள் வாரியான விவரம் மேலே அட்டவணையில் கொடுக்கப்பட்டுள்ளது.{age_coverage_note}")
             sugs = [
                 "பாலின வாரியாக உறுப்பினர்கள் விவரம்",
                 "பங்கில் உள்ள மொத்த உறுப்பினர்கள் எண்ணிக்கை",
                 "பங்கில் எத்தனை குடும்பங்கள் உள்ளன?"
             ]
         else:
-            lines = [
-                f"### 📊 {scope_name} — BCC / Anbiyam-wise Member & Family Distribution\n",
-                "| # | BCC / Anbiyam | Members | Families |",
-                "| :--- | :--- | :--- | :--- |"
-            ]
-            for idx, r in enumerate(sql_result, 1):
-                lines.append(f"| {idx} | **{r.get('bcc')}** | {r.get('total_members')} | {r.get('total_families')} |")
-            lines.append(f"| | **Total** | **{tot_m}** | **{tot_f}** |\n")
-            lines.append(f"Here is the BCC/Anbiyam-wise member and family distribution for **{scope_name}**.{age_coverage_note}")
+            if has_avg_size:
+                lines = [
+                    f"### 📊 {scope_name} — BCC / Anbiyam-wise Family Size & Member Distribution\n",
+                    "| # | BCC / Anbiyam | Families | Members | Avg Family Size |",
+                    "| :--- | :--- | :--- | :--- | :--- |"
+                ]
+                for idx, r in enumerate(sql_result, 1):
+                    lines.append(f"| {idx} | **{r.get('bcc')}** | {r.get('total_families')} | {r.get('total_members')} | **{r.get('avg_family_size', '-')}** |")
+                lines.append(f"| | **Total / Overall** | **{tot_f}** | **{tot_m}** | **{avg_overall}** |\n")
+                lines.append(f"Here is the average family size and member distribution across BCC units in **{scope_name}**.{age_coverage_note}")
+            else:
+                lines = [
+                    f"### 📊 {scope_name} — BCC / Anbiyam-wise Member & Family Distribution\n",
+                    "| # | BCC / Anbiyam | Members | Families |",
+                    "| :--- | :--- | :--- | :--- |"
+                ]
+                for idx, r in enumerate(sql_result, 1):
+                    lines.append(f"| {idx} | **{r.get('bcc')}** | {r.get('total_members')} | {r.get('total_families')} |")
+                lines.append(f"| | **Total** | **{tot_m}** | **{tot_f}** |\n")
+                lines.append(f"Here is the BCC/Anbiyam-wise member and family distribution for **{scope_name}**.{age_coverage_note}")
             sugs = [
                 "Give the gender-wise member count",
                 "How many members are in our parish?",
