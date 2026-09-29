@@ -2161,14 +2161,14 @@ def format_response_node(state: GraphState) -> GraphState:
                         if distinct_others:
                             if is_tam:
                                 ans += f"\n\n---\n💡 **பங்கில் '{first_tok}' என்ற பெயரில் உள்ள பிற குடும்பங்கள் (Did you mean?):**\n"
-                                for o in distinct_others[:3]:
+                                for o in distinct_others[:2]:
                                     ans += f"• **{o.get('full_name')}** (குடும்ப அட்டை `#{o.get('family_card_number')}`, {o.get('anbiyam')})\n"
-                                ans += "\n*(அவர்களின் விவரங்களைக் காண கீழே உள்ள பரிந்துரைகளைக் கிளிக் செய்யவும்)*"
+                                ans += "\n*(அவர்களின் விவரங்களைக் காண கீழே உள்ள பரிந்துரைகளில் கிளிக் செய்யவும்)*"
                             else:
-                                ans += f"\n\n---\n💡 **Other parishioners matching '{first_tok}' in this parish (Did you mean?):**\n"
-                                for o in distinct_others[:3]:
+                                ans += f"\n\n---\n💡 **Other parishioners matching '{first_tok}' in this parish (Top 2 matched):**\n"
+                                for o in distinct_others[:2]:
                                     ans += f"• **{o.get('full_name')}** (Card `#{o.get('family_card_number')}`, {o.get('anbiyam')})\n"
-                                ans += "\n*(Click any of the suggested questions below to view their household)*"
+                                ans += "\n*(Select from the suggestions panel below to view their household)*"
                 except Exception as disambig_err:
                     print(f"[format_response] Disambiguation notice error: {disambig_err}")
 
@@ -2941,12 +2941,19 @@ def run_query(question: str, history: list = None, reference_text: str = None, u
         except Exception as e:
             print(f"[run_query] Failed to update query history SQL: {e}")
 
+    displayed_card = None
+    sql_res = final_state.get("sql_result")
+    if sql_res and isinstance(sql_res, list) and len(sql_res) > 0 and isinstance(sql_res[0], dict):
+        displayed_card = sql_res[0].get("family_card_number") or sql_res[0].get("family_card_no")
+
     suggested = final_state.get("suggested_questions") or generate_suggested_questions(
         question, 
         user_role=user_role, 
         user_diocese=user_diocese,
         user_parish=user_parish,
-        user_vicariate=user_vicariate
+        user_vicariate=user_vicariate,
+        enhanced_query=final_state.get("enhanced_query") or "",
+        displayed_card=displayed_card
     )
     return {
         "reply": final_state.get("final_answer", ""),
@@ -2965,17 +2972,28 @@ def generate_suggested_questions(
     user_role: str = "Parish Priest", 
     user_diocese: str = "Salem",
     user_parish: str = None,
-    user_vicariate: str = None
+    user_vicariate: str = None,
+    enhanced_query: str = "",
+    displayed_card: str = None
 ) -> list:
     """Generates 3-4 highly relevant contextual follow-up questions using AI strictly answerable from available church database DocTypes and bounded by user's role jurisdiction."""
     if not question or not question.strip():
         return []
     
-    # 0. Dynamic Same-Name Disambiguation: Top 3 Suggestions
+    # 0. Dynamic Same-Name Disambiguation: Top 2 Alternative Suggestions
     name_suggestions = []
     try:
-        name_match = re.search(r'(?:family\s+details\s+of|family\s+members\s+of|details\s+of|member\s+details\s+of|about|who\s+is|show\s+family\s+of|family\s+of)\s+([A-Za-z0-9\s.]+)', question, re.IGNORECASE)
+        combined_q = f"{question} {enhanced_query}".strip()
+        name_match = re.search(r'(?:family\s+details\s+of|family\s+members\s+of|details\s+of|member\s+details\s+of|about|who\s+is|show\s+family\s+of|family\s+of)\s+([A-Za-z0-9\s.]+)', combined_q, re.IGNORECASE)
         name_query = name_match.group(1).strip() if name_match else ""
+        if not name_query:
+            tam_match = re.search(r'([\u0B80-\u0BFF\s]+)\s+(?:குடும்ப|விவரங்கள்|உறுப்பினர்கள்)', question)
+            if tam_match:
+                try:
+                    from koinonia_assistant.rag.tamil_utils import transliterate_tamil_to_english
+                    name_query = transliterate_tamil_to_english(tam_match.group(1).strip())
+                except Exception:
+                    pass
         if not name_query and len(question.split()) <= 3 and not any(kw in question.lower() for kw in ["how", "count", "list", "show all", "total", "what", "where", "our"]):
             name_query = question.strip()
             
@@ -3023,13 +3041,15 @@ def generate_suggested_questions(
                 candidates = []
                 for r in rows:
                     fid = r.get("family_card_number") or r.get("member_id")
+                    if displayed_card and (r.get("family_card_number") == displayed_card or r.get("family_card_no") == displayed_card):
+                        continue
                     if fid not in seen_fams:
                         seen_fams.add(fid)
                         candidates.append(r)
                 
-                if len(candidates) > 1:
+                if candidates:
                     is_tam = bool(re.search(r'[\u0B80-\u0BFF]', question))
-                    for c in candidates[:3]:
+                    for c in candidates[:2]:
                         c_name = c.get('full_name', '').strip()
                         c_card = c.get('family_card_number', '').strip()
                         card_suffix = f" (Card #{c_card})" if c_card else ""
@@ -3040,8 +3060,8 @@ def generate_suggested_questions(
     except Exception as d_err:
         print(f"[generate_suggested_questions] Disambiguation helper error: {d_err}")
 
-    if len(name_suggestions) >= 2:
-        return name_suggestions[:3]
+    if len(name_suggestions) >= 1:
+        return name_suggestions[:2]
 
     parish_info = f"Assigned Parish: {user_parish}" if user_parish else "No single parish assigned"
     vicariate_info = f"Assigned Vicariate: {user_vicariate}" if user_vicariate else ""
