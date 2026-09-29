@@ -483,6 +483,8 @@ def fetch_few_shot_examples(query_embedding: list[float], k: int = 1) -> str:
                 SELECT user_question, generated_sql
                 FROM koinonia_query_history
                 WHERE correctness_flag = 1
+                  AND generated_sql IS NOT NULL
+                  AND LENGTH(TRIM(generated_sql)) > 10
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s;
             """, (query_embedding, k))
@@ -527,15 +529,22 @@ def log_query_history(question: str, sql: str, embedding: list[float]) -> int:
         conn.close()
     return row_id
 
-def update_correctness_flag(query_id: int, is_correct: int):
+def update_correctness_flag(query_id: int, is_correct: int, sql: str = ""):
     if query_id < 0:
         return
     conn = psycopg2.connect(**PG_CONFIG)
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE koinonia_query_history SET correctness_flag = %s WHERE id = %s;
-            """, (is_correct, query_id))
+            if sql and sql not in ["UNSUPPORTED", "UNAUTHORIZED_DIOCESE", "UNAUTHORIZED_PARISH", "BLOCKED_SECURITY"]:
+                cur.execute("""
+                    UPDATE koinonia_query_history 
+                    SET correctness_flag = %s, generated_sql = %s 
+                    WHERE id = %s;
+                """, (is_correct, sql, query_id))
+            else:
+                cur.execute("""
+                    UPDATE koinonia_query_history SET correctness_flag = %s WHERE id = %s;
+                """, (is_correct, query_id))
         conn.commit()
     except Exception as e:
         print("[History] Error updating correctness flag:", e)
@@ -769,6 +778,9 @@ Examples:
 - "list membes who completed babtizum in 2024" -> "List members who completed baptism in 2024"
 - "who is the famly hed in st joshep parsh" -> "Who is the family head in St. Joseph Parish"
 - "how many familys in lourdu matha bcc" -> "How many families in Lourdu Matha BCC"
+- "பங்கில் உள்ள மொத்த குடும்பங்களின் எண்ணிக்கை எவ்வளவு?" -> "How many families are in my parish?"
+- "நம் பங்கில் மொத்தம் எத்தனை நபர்கள் உள்ளார்கள்" -> "How many members are in our parish?"
+- "பங்கில் உள்ள குடும்பங்களின் எண்ணிக்கை" -> "Total number of families in my parish"
 
 CRITICAL RULES:
 1. Return ONLY the translated, corrected English question string.
@@ -976,7 +988,7 @@ SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
    - Multi-sacrament family aggregation: `SELECT f.name AS family_id, f.parish_id AS parish_name, f.vicariate_id, COUNT(m.name) AS total_members, SUM((m.bapt_date IS NOT NULL) + (m.fhc_date IS NOT NULL) + (m.cnf_date IS NOT NULL) + (m.mrg_date IS NOT NULL)) AS total_sacraments FROM tabFamily f JOIN tabMember m ON m.family_id = f.name WHERE f.diocese_id = '{user_diocese}' GROUP BY f.name, f.parish_id, f.vicariate_id HAVING COUNT(m.name) >= 4 AND total_sacraments >= 3 ORDER BY total_members DESC LIMIT 50`
 8. NEVER JOIN `tabMember` or `tabFamily` with sacrament tables (`tabBaptism`, `tabCommunion`, `tabConfirmation`, `tabMarriage`, `tabDeath`, `tabAnointing Of Sick`). Always query sacrament tables directly.
 9. To find members in a Zone → JOIN tabMember with tabFamily on `tabMember.family_id = tabFamily.name`, filter `tabFamily.zone_id = 'Zone X'`.
-10. To find families/members in a BCC → filter `tabFamily.parish_bcc_id = '[BCC Name]'`. Never use place_of_birth.
+10. In `tabFamily`, the parish column is strictly `parish_id` (e.g. `WHERE parish_id = '{user_parish}'` or `SELECT COUNT(*) AS total_families FROM tabFamily WHERE parish_id = '{user_parish}'`). NEVER use `parish_bcc_id` for parish names! `parish_bcc_id` is ONLY for BCC / Anbiyam names (such as 'St. Joseph Anbiyam' or 'Arockiya Annai Anbiyam'). When searching BCC, always use `LIKE '%[BCC Name]%'` (e.g. `parish_bcc_id LIKE '%Joseph%'`).
 11. To list parishes in a vicariate → `FROM tabParish WHERE vicariate_id = '[vicariate name]'`.
 12. NEVER use `parish_priest` to filter parish name. Use `bapt_parish_id`, `mrg_parish_id`, `cnf_parish_id`, `fhc_parish_id`, `death_parish_id`, or `parish_id`.
 
@@ -989,7 +1001,10 @@ SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
 18. Recent records ("last 6 months"): `WHERE [date_col] >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)`.
 
 ### Aggregation, Counts & Lists:
-19. Count-only ("how many", "count"): `SELECT COUNT(*) FROM ...`. For Bishop asking count in diocese without single parish name, return parish-wise breakdown: `SELECT parish_id AS parish_name, COUNT(*) AS total_families FROM tabFamily WHERE diocese_id = '{user_diocese}' GROUP BY parish_id ORDER BY total_families DESC`.
+19. Count-only ("how many", "count"): `SELECT COUNT(*) FROM ...`.
+    - Total families in user's parish: `SELECT COUNT(*) AS total_families FROM tabFamily WHERE parish_id = '{user_parish}'`.
+    - Total members in user's parish: `SELECT COUNT(*) AS total_members FROM tabMember WHERE parish_id = '{user_parish}'`.
+    - For Bishop asking count in diocese without single parish name, return parish-wise breakdown: `SELECT parish_id AS parish_name, COUNT(*) AS total_families FROM tabFamily WHERE diocese_id = '{user_diocese}' GROUP BY parish_id ORDER BY total_families DESC`.
 20. List / Show Records queries ("show", "list", "display", "find", "who are"): Select readable columns. Never use COUNT(*).
 21. Grouped counts: `SELECT [group_col], COUNT(*) FROM ... GROUP BY [group_col] ORDER BY COUNT(*) DESC`. Include `[col] IS NOT NULL AND [col] != ''`.
 22. "How many AND list them": Return just the list of rows (no COUNT(*)).
@@ -1349,8 +1364,8 @@ def enforce_jurisdiction_sql_single(sql: str, state: GraphState) -> str:
     is_pure_count = "COUNT(" in sql_upper and "FIRST_NAME" not in sql_upper and "LAST_NAME" not in sql_upper and "DOB" not in sql_upper and "MOBILE" not in sql_upper
     
     # 2. Vicariate / Controlled Parishes constraints for Vicar General & Vicar Forane (applied strictly to DATA queries)
-    if not is_pure_count:
-        if user_role in ["Vicar General", "Vicar Forane"]:
+    if user_role in ["Vicar General", "Vicar Forane"]:
+        if not is_pure_count:
             if user_parishes and table_name in parish_col_map:
                 parish_col = parish_col_map[table_name]
                 parish_list_str = ", ".join([sql_quote_str(p) for p in user_parishes])
@@ -1369,23 +1384,32 @@ def enforce_jurisdiction_sql_single(sql: str, state: GraphState) -> str:
                 if "NAME" not in sql_upper and "VICARIATE_ID" not in sql_upper:
                     conditions.append(f"{table_prefix}`name` IN ({parish_list_str})")
             
-        # 3. Parish ID constraint for Parish Priest / Parishioner (for personal tables only)
-        elif user_role in ["Parish Priest", "Parishioner"] and user_parish and table_name in parish_col_map:
-            parish_col = parish_col_map[table_name]
-            has_assigned_parish = (
-                user_parish.upper() in sql_upper or 
-                user_parish_esc.upper() in sql_upper or 
-                sql_quote_str(user_parish).upper() in sql_upper or
-                user_parish.replace("'", r"\'").upper() in sql_upper
-            )
-            # Replace any foreign parish filter that was generated with the user's assigned parish
-            if parish_col.upper() in sql_upper or "PARISH_ID" in sql_upper:
-                if not has_assigned_parish:
-                    sql = re.sub(r"\b" + parish_col + r"\s*=\s*(?:'[^']*'|\"[^\"]*\")", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
-                    sql = re.sub(r"\bparish_id\s*=\s*(?:'[^']*'|\"[^\"]*\")", f"parish_id = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
-                    sql_upper = sql.upper()
-            else:
-                conditions.append(f"{table_prefix}`{parish_col}` = {sql_quote_str(user_parish)}")
+    # 3. Parish ID constraint for Parish Priest / Parishioner (applies strictly to ALL queries including counts)
+    elif user_role in ["Parish Priest", "Parishioner"] and user_parish and table_name in parish_col_map:
+        parish_col = parish_col_map[table_name]
+
+        # Fix LLM confusion where parish_bcc_id was used instead of parish_id in tabFamily
+        if table_name == "tabFamily" and "PARISH_BCC_ID" in sql_upper:
+            p_esc = re.escape(user_parish)
+            sql = re.sub(r"\bparish_bcc_id\s*=\s*['\"]" + p_esc + r"['\"]", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+            sql = re.sub(r"\bparish_bcc_id\s+LIKE\s+['\"]%?" + p_esc + r"%?['\"]", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+            sql = re.sub(r"\bparish_bcc_id\s*=\s*['\"][^'\"]*Parish['\"]", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+            sql_upper = sql.upper()
+
+        has_assigned_parish = (
+            user_parish.upper() in sql_upper or 
+            user_parish_esc.upper() in sql_upper or 
+            sql_quote_str(user_parish).upper() in sql_upper or
+            user_parish.replace("'", r"\'").upper() in sql_upper
+        )
+        # Replace any foreign parish filter that was generated with the user's assigned parish
+        if parish_col.upper() in sql_upper or "PARISH_ID" in sql_upper:
+            if not has_assigned_parish:
+                sql = re.sub(r"\b" + parish_col + r"\s*=\s*(?:'[^']*'|\"[^\"]*\")", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+                sql = re.sub(r"\bparish_id\s*=\s*(?:'[^']*'|\"[^\"]*\")", f"{parish_col} = {sql_quote_str(user_parish)}", sql, flags=re.IGNORECASE)
+                sql_upper = sql.upper()
+        else:
+            conditions.append(f"{table_prefix}`{parish_col}` = {sql_quote_str(user_parish)}")
             
     if user_role in ["Bishop", "Curia", "Chancellor", "Administrator"]:
         # Strip accidental empty parish_id = '' or parish_id = '{user_diocese}'
@@ -1476,6 +1500,22 @@ def validate_sql_node(state: GraphState) -> GraphState:
 
     # Automatically sanitize and polish select clause to ensure meaningful columns
     sql = sanitize_select_clause(sql, state["question"])
+
+    # Automatically resolve canonical BCC name in tabFamily filters
+    if "PARISH_BCC_ID" in sql.upper():
+        bcc_match = re.search(r"\bparish_bcc_id\s+(?:LIKE|=)\s+['\"]%?([^%'\"\n]+)%?['\"]", sql, re.IGNORECASE)
+        if bcc_match:
+            raw_bcc = bcc_match.group(1).strip()
+            from koinonia_assistant.rag.name_search import resolve_canonical_bcc
+            canon_bcc = resolve_canonical_bcc(raw_bcc, user_parish=state.get("user_parish"))
+            if canon_bcc and canon_bcc != raw_bcc:
+                sql = re.sub(
+                    r"\bparish_bcc_id\s+(?:LIKE|=)\s+['\"][^'\"]*['\"]",
+                    f"parish_bcc_id = {sql_quote_str(canon_bcc)}",
+                    sql,
+                    flags=re.IGNORECASE
+                )
+
     state = {**state, "generated_sql": sql}
 
 
@@ -1968,7 +2008,33 @@ def format_response_node(state: GraphState) -> GraphState:
                 k = headers[0]
                 v = raw_results[0].get(k)
                 label = str(k).replace("_", " ").title().replace("Count(*)", "Total Count").replace("Count(Idx)", "Total Count")
-                ans = f"**{label}**: {v}"
+                q_original = state.get("question") or ""
+                eq_lower = (state.get("enhanced_query") or "").lower()
+                is_tam = bool(re.search(r'[\u0B80-\u0BFF]', q_original)) or any(kw in q_original.lower() for kw in ["tamil", "தமிழில்", "தமிழ்"])
+                
+                if label == "Total Count":
+                    if "family" in eq_lower or "famil" in eq_lower or "குடும்ப" in q_original:
+                        label = "Total Families"
+                    elif "member" in eq_lower or "உறுப்பினர்" in q_original or "நபர்கள்" in q_original:
+                        label = "Total Members"
+                    elif "bapt" in eq_lower or "ஞானஸ்நான" in q_original:
+                        label = "Total Baptisms"
+                    elif "marr" in eq_lower or "திருமண" in q_original:
+                        label = "Total Marriages"
+
+                if is_tam:
+                    ta_labels = {
+                        "Total Count": "மொத்த எண்ணிக்கை (Total Count)",
+                        "Total Families": "மொத்த குடும்பங்கள் (Total Families)",
+                        "Total Members": "மொத்த உறுப்பினர்கள் (Total Members)",
+                        "Total Parishes": "மொத்த பங்குகள் (Total Parishes)",
+                        "Total Baptisms": "மொத்த ஞானஸ்நானங்கள் (Total Baptisms)",
+                        "Total Marriages": "மொத்த திருமணங்கள் (Total Marriages)",
+                    }
+                    ta_lbl = ta_labels.get(label, label)
+                    ans = f"**{ta_lbl}**: **{v}**"
+                else:
+                    ans = f"**{label}**: {v}"
                 
             # Format 2: Single Row, Multiple Columns (Rich Sacramental Card / Certificate)
             elif len(raw_results) == 1 and len(headers) > 1:
@@ -2374,7 +2440,7 @@ def format_response_node(state: GraphState) -> GraphState:
 
     # Log successful queries for few-shot learning
     if state.get("history_id") and state.get("history_id") > 0:
-        update_correctness_flag(state["history_id"], 1)
+        update_correctness_flag(state["history_id"], 1, state.get("generated_sql") or "")
 
     return {**state, "final_answer": ans}
 
