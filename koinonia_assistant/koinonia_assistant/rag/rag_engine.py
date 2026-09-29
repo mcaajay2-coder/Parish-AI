@@ -581,6 +581,8 @@ class GraphState(TypedDict):
     user_email:        str
     requested_foreign_parish: str
     requested_foreign_diocese: str
+    disambiguation:    dict
+    suggested_questions: list
 
 # ─── Graph Nodes ──────────────────────────────────────────────────────────────
 
@@ -1073,8 +1075,8 @@ SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
           END ASC, creation DESC 
           LIMIT 1
       ) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
-    - SINGLE AMBIGUOUS FIRST NAME (e.g., "Antony", "Rose"):
-      When only a single name token is queried:
+    - SAME-NAME PERSONS / COMMON FIRST NAME DISAMBIGUATION (e.g., "Antony", "Rose", "Joseph"):
+      When an ambiguous or common first name is queried without a specific card number or distinct multi-token surname:
       WHERE m.family_id = (
           SELECT family_id FROM tabMember 
           WHERE (first_name = '[Name]' OR first_name LIKE '[Name] %' OR first_name LIKE '% [Name]%' OR CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Name]%')
@@ -1086,6 +1088,7 @@ SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
           END ASC, dob ASC 
           LIMIT 1
       ) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
+      NOTE: If multiple distinct households in the parish share this name (e.g., multiple Antony's), the assistant automatically presents an interactive card-based option chooser displaying the top 3 matching parishioners with Select buttons!
 45. Relationship between two persons: SELECT CONCAT_WS(' ', m1.first_name, NULLIF(m1.middle_name, ''), m1.last_name) AS person1_fullname, m1.relationship_id AS relationship1, m1.parish_id AS parish_name, CONCAT_WS(' ', m2.first_name, NULLIF(m2.middle_name, ''), m2.last_name) AS person2_fullname, m2.relationship_id AS relationship2, m1.family_id, m1.diocese_id FROM tabMember m1 JOIN tabMember m2 ON m1.family_id = m2.family_id WHERE (m1.first_name LIKE '%[name1]%') AND (m2.first_name LIKE '%[name2]%') LIMIT 1.
 46. Single Diocese Profile: SELECT diocese_name, bishop_name, established_date, city, phone, email, website, note FROM tabDiocese WHERE (name LIKE '%[diocese]%' OR diocese_name LIKE '%[diocese]%') LIMIT 1.
 47. Listing all Dioceses: SELECT diocese_name, bishop_name, established_date, city, phone, email FROM tabDiocese ORDER BY diocese_name ASC.
@@ -2108,67 +2111,132 @@ def format_response_node(state: GraphState) -> GraphState:
                             c_d = _fmt_date_str(r.get("communion_date") or r.get("fhc_date"))
                             cnf_d = _fmt_date_str(r.get("confirmation_date") or r.get("cnf_date"))
                             m_d = _fmt_date_str(r.get("marriage_date") or r.get("mrg_date"))
-                # Disambiguation Notice for Same-Name Persons (if multiple distinct households share the searched name)
+                # Disambiguation Check for Same-Name Persons (Card-based option choosing)
                 try:
                     import frappe
                     q_input = state.get("question") or ""
-                    tokens_searched = [t.strip() for t in re.split(r'[\s%._]+', q_input) if len(t.strip()) > 2 and t.lower() not in ["family", "details", "member", "members", "the", "show", "our", "parish", "give", "list"]]
-                    if tokens_searched and hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
-                        first_tok = tokens_searched[0]
+                    is_tam = bool(re.search(r'[\u0B80-\u0BFF]', q_input)) or any(kw in q_input.lower() for kw in ["tamil", "தமிழில்", "தமிழ்"])
+                    has_explicit_card = bool(re.search(r'(?:card\s*#?\s*|family\s*card\s*#?\s*|\b)([A-Za-z]{2,4}\s*/\s*\d{3,4})\b', q_input, re.IGNORECASE))
+                    
+                    if not has_explicit_card and hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+                        clean_q = re.sub(r'(?i)\b(family\s+details\s+of|family\s+members\s+of|family\s+details\s+for|family\s+of|show\s+family\s+details\s+for|show\s+family\s+details\s+of|details\s+of|members\s+of|sacraments\s+of|sacrament\s+details\s+of|show|give|the|our|parish|who\s+is|please|find|list|get)\b', '', q_input)
+                        clean_q = re.sub(r'(?:குடும்ப\s*விவரங்கள்|குடும்ப\s*உறுப்பினர்கள்|குடும்ப\s*விவரம்|குடும்பம்|அருளடையாளங்கள்|பட்டியல்|காட்டு|கூறு)', '', clean_q)
+                        clean_q = re.sub(r'\(.*?\)', '', clean_q)
+                        tokens_searched = [t.strip() for t in re.split(r'[\s%._]+', clean_q) if len(t.strip()) > 1 and t.lower() not in ["card", "family", "details", "member", "members", "the", "show", "our", "parish", "give", "list"]]
+                        
                         parish_id = state.get("user_parish") or "Yelagiri Parish"
-                        other_sql = """
-                            SELECT m.name AS member_id,
-                                   CONCAT_WS(' ', m.first_name, NULLIF(m.middle_name, ''), m.last_name) AS full_name,
-                                   m.relationship_id,
-                                   m.age,
-                                   f.family_card_number,
-                                   f.parish_bcc_id AS anbiyam
-                            FROM tabMember m
-                            JOIN tabFamily f ON m.family_id = f.name
-                            WHERE (
-                                m.first_name = %s 
-                                OR m.first_name LIKE %s 
-                                OR m.first_name LIKE %s
-                                OR m.middle_name LIKE %s
-                                OR m.last_name LIKE %s
-                            )
-                            AND m.parish_id = %s
-                            AND f.family_card_number != %s
-                            ORDER BY 
-                                CASE 
-                                    WHEN m.first_name = %s THEN 1 
-                                    WHEN m.first_name LIKE %s THEN 2 
-                                    ELSE 3 
-                                END,
-                                CASE 
-                                    WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 
-                                    WHEN m.relationship_id = 'Wife' THEN 2 
-                                    ELSE 3 
-                                END,
-                                m.dob ASC
-                            LIMIT 10
-                        """
-                        prefix = f"{first_tok}%"
-                        word_boundary = f"% {first_tok}%"
-                        other_rows = frappe.db.sql(other_sql, (first_tok, prefix, word_boundary, prefix, prefix, parish_id, fc_val or "", first_tok, prefix), as_dict=True)
-                        seen_other_fams = set()
-                        distinct_others = []
-                        for orow in other_rows:
-                            ofid = orow.get("family_card_number") or orow.get("member_id")
-                            if ofid not in seen_other_fams:
-                                seen_other_fams.add(ofid)
-                                distinct_others.append(orow)
-                        if distinct_others:
-                            if is_tam:
-                                ans += f"\n\n---\n💡 **பங்கில் '{first_tok}' என்ற பெயரில் உள்ள பிற குடும்பங்கள் (Did you mean?):**\n"
-                                for o in distinct_others[:2]:
-                                    ans += f"• **{o.get('full_name')}** (குடும்ப அட்டை `#{o.get('family_card_number')}`, {o.get('anbiyam')})\n"
-                                ans += "\n*(அவர்களின் விவரங்களைக் காண கீழே உள்ள பரிந்துரைகளில் கிளிக் செய்யவும்)*"
-                            else:
-                                ans += f"\n\n---\n💡 **Other parishioners matching '{first_tok}' in this parish (Top 2 matched):**\n"
-                                for o in distinct_others[:2]:
-                                    ans += f"• **{o.get('full_name')}** (Card `#{o.get('family_card_number')}`, {o.get('anbiyam')})\n"
-                                ans += "\n*(Select from the suggestions panel below to view their household)*"
+                        
+                        # Only disambiguate single-token or ambiguous short queries (not multi-token unique names like "Rose King" or "Antony Selvan P")
+                        if tokens_searched and len(tokens_searched) == 1:
+                            first_tok = tokens_searched[0]
+                            if bool(re.search(r'[\u0B80-\u0BFF]', first_tok)):
+                                try:
+                                    from koinonia_assistant.rag.tamil_utils import transliterate_tamil_name
+                                    trans_tok = transliterate_tamil_name(first_tok)
+                                    if trans_tok:
+                                        first_tok = trans_tok
+                                except Exception:
+                                    pass
+
+                            other_sql = """
+                                SELECT m.name AS member_id,
+                                       CONCAT_WS(' ', m.first_name, NULLIF(m.middle_name, ''), m.last_name) AS full_name,
+                                       m.relationship_id,
+                                       m.age,
+                                       f.family_card_number,
+                                       f.parish_bcc_id AS anbiyam,
+                                       f.street,
+                                       f.city
+                                FROM tabMember m
+                                JOIN tabFamily f ON m.family_id = f.name
+                                WHERE (
+                                    m.first_name = %s 
+                                    OR m.first_name LIKE %s 
+                                    OR m.first_name LIKE %s
+                                    OR m.middle_name LIKE %s
+                                    OR m.last_name LIKE %s
+                                    OR CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) LIKE %s
+                                )
+                                AND m.parish_id = %s
+                                AND f.family_card_number != %s
+                                ORDER BY 
+                                    CASE 
+                                        WHEN m.first_name = %s THEN 1 
+                                        WHEN m.first_name LIKE %s THEN 2 
+                                        ELSE 3 
+                                    END,
+                                    CASE 
+                                        WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 
+                                        WHEN m.relationship_id = 'Wife' THEN 2 
+                                        ELSE 3 
+                                    END,
+                                    m.dob ASC
+                                LIMIT 10
+                            """
+                            prefix = f"{first_tok}%"
+                            word_boundary = f"% {first_tok}%"
+                            contains = f"%{first_tok}%"
+                            other_rows = frappe.db.sql(other_sql, (first_tok, prefix, word_boundary, prefix, prefix, contains, parish_id, fc_val or "", first_tok, prefix), as_dict=True)
+                            seen_other_fams = set()
+                            distinct_others = []
+                            for orow in other_rows:
+                                ofid = orow.get("family_card_number") or orow.get("member_id")
+                                if ofid not in seen_other_fams:
+                                    seen_other_fams.add(ofid)
+                                    distinct_others.append(orow)
+                                    
+                            if distinct_others:
+                                # Multiple distinct matching households! Build top 3 candidate options
+                                all_cands = [first_r] + distinct_others
+                                seen_cards = set()
+                                disambig_options = []
+                                for c in all_cands:
+                                    c_card = c.get("family_card_number") or c.get("family_card_no") or c.get("family_id") or ""
+                                    if not c_card or c_card in seen_cards:
+                                        continue
+                                    seen_cards.add(c_card)
+                                    c_name = c.get("full_name") or ""
+                                    c_anbiyam = c.get("anbiyam") or c.get("parish_bcc_id") or ""
+                                    c_city = c.get("city") or parish_id
+                                    c_place = f"{c_anbiyam}, {c_city}" if c_anbiyam and c_city else (c_anbiyam or c_city or parish_id)
+                                    
+                                    p_prompt = f"Family details of {c_name} (Card #{c_card})" if not is_tam else f"{c_name} குடும்ப விவரங்கள் (அட்டை #{c_card})"
+                                    p_display = f"Family details of {c_name}" if not is_tam else f"{c_name} குடும்ப விவரங்கள்"
+                                    
+                                    disambig_options.append({
+                                        "full_name": c_name,
+                                        "type": "member",
+                                        "card_no": c_card,
+                                        "place": c_place,
+                                        "prompt": p_prompt,
+                                        "display_text": p_display
+                                    })
+                                    if len(disambig_options) >= 3:
+                                        break
+                                
+                                search_label = first_tok.title()
+                                disambig_obj = {
+                                    "search_name": search_label,
+                                    "message": f"Multiple parishioners found matching '{search_label}'. Please select which person's family you wish to view:" if not is_tam else f"'{first_tok}' என்ற பெயரில் பல நபர்கள் உள்ளனர். தயவுசெய்து நீங்கள் பார்க்க விரும்பும் குடும்பத்தைத் தேர்ந்தெடுக்கவும்:",
+                                    "options": disambig_options
+                                }
+                                
+                                if is_tam:
+                                    markdown_ans = f"### 👥 '{first_tok}' என்ற பெயரில் பல குடும்பங்கள் கண்டறியப்பட்டன\n\nபங்கில் '{first_tok}' என்ற பெயரில் பல நபர்கள் உள்ளனர். நீங்கள் யாருடைய குடும்ப விவரங்களைப் பார்க்க விரும்புகிறீர்கள் என்பதைத் தேர்ந்தெடுக்கவும்:\n\n"
+                                    for opt in disambig_options:
+                                        markdown_ans += f"• **{opt['full_name']}** — குடும்ப அட்டை `#{opt['card_no']}` ({opt['place']})\n"
+                                else:
+                                    markdown_ans = f"### 👥 Multiple Records Matching '{search_label}' Found\n\nMultiple parishioners in this parish match '**{search_label}**'. Please select which person's household you wish to view:\n\n"
+                                    for opt in disambig_options:
+                                        markdown_ans += f"• **{opt['full_name']}** — Family Card `#{opt['card_no']}` ({opt['place']})\n"
+                                        
+                                return {
+                                    **state,
+                                    "final_answer": markdown_ans,
+                                    "disambiguation": disambig_obj,
+                                    "sql_result": [],
+                                    "suggested_questions": []
+                                }
                 except Exception as disambig_err:
                     print(f"[format_response] Disambiguation notice error: {disambig_err}")
 
@@ -2906,7 +2974,9 @@ def run_query(question: str, history: list = None, reference_text: str = None, u
         "user_diocese": user_diocese,
         "user_parishes": user_parishes or [],
         "user_member_id": user_member_id,
-        "user_email": user_email
+        "user_email": user_email,
+        "disambiguation": None,
+        "suggested_questions": []
     }
     
     langsmith_config = {
@@ -2946,22 +3016,28 @@ def run_query(question: str, history: list = None, reference_text: str = None, u
     if sql_res and isinstance(sql_res, list) and len(sql_res) > 0 and isinstance(sql_res[0], dict):
         displayed_card = sql_res[0].get("family_card_number") or sql_res[0].get("family_card_no")
 
-    suggested = final_state.get("suggested_questions") or generate_suggested_questions(
-        question, 
-        user_role=user_role, 
-        user_diocese=user_diocese,
-        user_parish=user_parish,
-        user_vicariate=user_vicariate,
-        enhanced_query=final_state.get("enhanced_query") or "",
-        displayed_card=displayed_card
-    )
+    has_disambig = bool(final_state.get("disambiguation"))
+
+    suggested = []
+    if not has_disambig:
+        suggested = final_state.get("suggested_questions") or generate_suggested_questions(
+            question, 
+            user_role=user_role, 
+            user_diocese=user_diocese,
+            user_parish=user_parish,
+            user_vicariate=user_vicariate,
+            enhanced_query=final_state.get("enhanced_query") or "",
+            displayed_card=displayed_card
+        )
+
     return {
         "reply": final_state.get("final_answer", ""),
         "answer": final_state.get("final_answer", ""),
         "generated_sql": generated_sql,
-        "sql_result": final_state.get("sql_result"),
-        "data": final_state.get("sql_result") or [],
-        "suggested_questions": suggested,
+        "sql_result": [] if has_disambig else final_state.get("sql_result"),
+        "data": [] if has_disambig else (final_state.get("sql_result") or []),
+        "disambiguation": final_state.get("disambiguation"),
+        "suggested_questions": [] if has_disambig else (final_state.get("suggested_questions") or suggested),
         "request_id": kwargs.get("request_id"),
         "error_message": final_state.get("error_message", "")
     }
@@ -3049,7 +3125,7 @@ def generate_suggested_questions(
                 
                 if candidates:
                     is_tam = bool(re.search(r'[\u0B80-\u0BFF]', question))
-                    for c in candidates[:2]:
+                    for c in candidates[:3]:
                         c_name = c.get('full_name', '').strip()
                         c_card = c.get('family_card_number', '').strip()
                         card_suffix = f" (Card #{c_card})" if c_card else ""
@@ -3061,7 +3137,7 @@ def generate_suggested_questions(
         print(f"[generate_suggested_questions] Disambiguation helper error: {d_err}")
 
     if len(name_suggestions) >= 1:
-        return name_suggestions[:2]
+        return name_suggestions[:3]
 
     parish_info = f"Assigned Parish: {user_parish}" if user_parish else "No single parish assigned"
     vicariate_info = f"Assigned Vicariate: {user_vicariate}" if user_vicariate else ""

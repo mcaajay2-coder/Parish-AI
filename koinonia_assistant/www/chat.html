@@ -4183,7 +4183,7 @@
                 }
 
                 // Add Excel / PDF Export buttons + Chart.js canvas if data is available
-                if (data && data.length > 0) {
+                if (data && data.length > 0 && !hasDisambigCard) {
                     // Ensure full_name is enriched in all data rows if name components are present
                     data.forEach(r => {
                         if (!r.full_name && (r.first_name || r.last_name || r.bridegroom_name || r.bride_name)) {
