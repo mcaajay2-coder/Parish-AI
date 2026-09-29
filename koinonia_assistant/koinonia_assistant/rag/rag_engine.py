@@ -1052,13 +1052,40 @@ SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
 41. Bride / groom religion: `WHERE bridegroom_religion_id != 'Catholic'` in tabMarriage.
 42. Multi-sacrament completion: Query `tabMember` directly `WHERE bapt_date IS NOT NULL AND fhc_date IS NOT NULL AND cnf_date IS NOT NULL`.
 43. Apostrophes in names (D'Souza, St. Mary's): Escape single quotes in SQL literals: `LIKE '%Souza%'` or `\'`.
-44. Family details & household members of a person:
+44. Family details & household members of a person (Exact Match Priority & Same-Name Disambiguation):
     - When user asks for "family details of [Person Name]", "family members of [Person Name]", "[Person Name] குடும்ப விவரங்கள்", or "[Person Name] குடும்ப உறுப்பினர்கள்":
     - The person is a member in tabMember (wife, child, husband, or head).
     - NEVER query tabFamily WHERE family_head_name = '[Person Name]'.
     - NEVER put LIMIT 1 on the outer query (that drops the other family members!).
-    - ALWAYS locate the member's family_id from tabMember, and JOIN tabMember m with tabFamily f on m.family_id = f.name to return ALL members in that household with family metadata:
-      SELECT m.name AS member_id, CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS full_name, m.relationship_id AS relationship, m.gender, m.age, m.dob, m.mobile, f.family_card_number, f.parish_bcc_id AS anbiyam, f.street, f.city, m.parish_id FROM tabMember m JOIN tabFamily f ON m.family_id = f.name WHERE m.family_id = (SELECT family_id FROM tabMember WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Person Name]%' OR (first_name LIKE '%[First]%' AND (middle_name LIKE '%[Last]%' OR last_name LIKE '%[Last]%')) OR first_name LIKE '%[First]%') AND parish_id = '{user_parish}' ORDER BY CASE WHEN CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Person Name]%' THEN 1 WHEN first_name LIKE '%[First]%' AND (middle_name LIKE '%[Last]%' OR last_name LIKE '%[Last]%') THEN 2 ELSE 3 END ASC LIMIT 1) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
+    - EXACT MULTI-TOKEN MATCH PRIORITY (Crucial for disambiguating same-name or similar-name persons):
+      When the user provides a multi-token name (e.g., "Rose King", "Antony Selvan", "Agnes Mary A"):
+      DO NOT allow a loose single-token OR condition like `OR first_name LIKE '%Rose%'` to override the exact person, because that matches unrelated members (e.g. 'Roselin' instead of 'Rose King')!
+      The subquery MUST strictly prioritize the full name:
+      WHERE m.family_id = (
+          SELECT family_id FROM tabMember 
+          WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Person Name]%' 
+                 OR (first_name LIKE '%[First]%' AND (middle_name LIKE '%[Second]%' OR last_name LIKE '%[Second]%')))
+            AND parish_id = '{user_parish}' 
+          ORDER BY CASE 
+              WHEN CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Person Name]%' THEN 1 
+              WHEN first_name LIKE '%[First]%' AND (middle_name LIKE '%[Second]%' OR last_name LIKE '%[Second]%') THEN 2 
+              ELSE 3 
+          END ASC, creation DESC 
+          LIMIT 1
+      ) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
+    - SINGLE AMBIGUOUS FIRST NAME (e.g., "Antony", "Rose"):
+      When only a single name token is queried:
+      WHERE m.family_id = (
+          SELECT family_id FROM tabMember 
+          WHERE (first_name = '[Name]' OR first_name LIKE '[Name] %' OR first_name LIKE '% [Name]%' OR CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Name]%')
+            AND parish_id = '{user_parish}' 
+          ORDER BY CASE 
+              WHEN first_name = '[Name]' THEN 1 
+              WHEN relationship_id IN ('Self', 'Head', 'Husband') THEN 2 
+              ELSE 3 
+          END ASC, dob ASC 
+          LIMIT 1
+      ) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
 45. Relationship between two persons: SELECT CONCAT_WS(' ', m1.first_name, NULLIF(m1.middle_name, ''), m1.last_name) AS person1_fullname, m1.relationship_id AS relationship1, m1.parish_id AS parish_name, CONCAT_WS(' ', m2.first_name, NULLIF(m2.middle_name, ''), m2.last_name) AS person2_fullname, m2.relationship_id AS relationship2, m1.family_id, m1.diocese_id FROM tabMember m1 JOIN tabMember m2 ON m1.family_id = m2.family_id WHERE (m1.first_name LIKE '%[name1]%') AND (m2.first_name LIKE '%[name2]%') LIMIT 1.
 46. Single Diocese Profile: SELECT diocese_name, bishop_name, established_date, city, phone, email, website, note FROM tabDiocese WHERE (name LIKE '%[diocese]%' OR diocese_name LIKE '%[diocese]%') LIMIT 1.
 47. Listing all Dioceses: SELECT diocese_name, bishop_name, established_date, city, phone, email FROM tabDiocese ORDER BY diocese_name ASC.
@@ -2081,8 +2108,70 @@ def format_response_node(state: GraphState) -> GraphState:
                             c_d = _fmt_date_str(r.get("communion_date") or r.get("fhc_date"))
                             cnf_d = _fmt_date_str(r.get("confirmation_date") or r.get("cnf_date"))
                             m_d = _fmt_date_str(r.get("marriage_date") or r.get("mrg_date"))
-                            ans += f"| **{fn}** | {rel} | {b_d} | {c_d} | {cnf_d} | {m_d} |\n"
-                
+                # Disambiguation Notice for Same-Name Persons (if multiple distinct households share the searched name)
+                try:
+                    import frappe
+                    q_input = state.get("question") or ""
+                    tokens_searched = [t.strip() for t in re.split(r'[\s%._]+', q_input) if len(t.strip()) > 2 and t.lower() not in ["family", "details", "member", "members", "the", "show", "our", "parish", "give", "list"]]
+                    if tokens_searched and hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+                        first_tok = tokens_searched[0]
+                        parish_id = state.get("user_parish") or "Yelagiri Parish"
+                        other_sql = """
+                            SELECT m.name AS member_id,
+                                   CONCAT_WS(' ', m.first_name, NULLIF(m.middle_name, ''), m.last_name) AS full_name,
+                                   m.relationship_id,
+                                   m.age,
+                                   f.family_card_number,
+                                   f.parish_bcc_id AS anbiyam
+                            FROM tabMember m
+                            JOIN tabFamily f ON m.family_id = f.name
+                            WHERE (
+                                m.first_name = %s 
+                                OR m.first_name LIKE %s 
+                                OR m.first_name LIKE %s
+                                OR m.middle_name LIKE %s
+                                OR m.last_name LIKE %s
+                            )
+                            AND m.parish_id = %s
+                            AND f.family_card_number != %s
+                            ORDER BY 
+                                CASE 
+                                    WHEN m.first_name = %s THEN 1 
+                                    WHEN m.first_name LIKE %s THEN 2 
+                                    ELSE 3 
+                                END,
+                                CASE 
+                                    WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 
+                                    WHEN m.relationship_id = 'Wife' THEN 2 
+                                    ELSE 3 
+                                END,
+                                m.dob ASC
+                            LIMIT 10
+                        """
+                        prefix = f"{first_tok}%"
+                        word_boundary = f"% {first_tok}%"
+                        other_rows = frappe.db.sql(other_sql, (first_tok, prefix, word_boundary, prefix, prefix, parish_id, fc_val or "", first_tok, prefix), as_dict=True)
+                        seen_other_fams = set()
+                        distinct_others = []
+                        for orow in other_rows:
+                            ofid = orow.get("family_card_number") or orow.get("member_id")
+                            if ofid not in seen_other_fams:
+                                seen_other_fams.add(ofid)
+                                distinct_others.append(orow)
+                        if distinct_others:
+                            if is_tam:
+                                ans += f"\n\n---\n💡 **பங்கில் '{first_tok}' என்ற பெயரில் உள்ள பிற குடும்பங்கள் (Did you mean?):**\n"
+                                for o in distinct_others[:3]:
+                                    ans += f"• **{o.get('full_name')}** (குடும்ப அட்டை `#{o.get('family_card_number')}`, {o.get('anbiyam')})\n"
+                                ans += "\n*(அவர்களின் விவரங்களைக் காண கீழே உள்ள பரிந்துரைகளைக் கிளிக் செய்யவும்)*"
+                            else:
+                                ans += f"\n\n---\n💡 **Other parishioners matching '{first_tok}' in this parish (Did you mean?):**\n"
+                                for o in distinct_others[:3]:
+                                    ans += f"• **{o.get('full_name')}** (Card `#{o.get('family_card_number')}`, {o.get('anbiyam')})\n"
+                                ans += "\n*(Click any of the suggested questions below to view their household)*"
+                except Exception as disambig_err:
+                    print(f"[format_response] Disambiguation notice error: {disambig_err}")
+
                 return {**state, "final_answer": ans}
 
             # Check for Parish Profile & History (Strictly for tabParish)
@@ -2882,6 +2971,78 @@ def generate_suggested_questions(
     if not question or not question.strip():
         return []
     
+    # 0. Dynamic Same-Name Disambiguation: Top 3 Suggestions
+    name_suggestions = []
+    try:
+        name_match = re.search(r'(?:family\s+details\s+of|family\s+members\s+of|details\s+of|member\s+details\s+of|about|who\s+is|show\s+family\s+of|family\s+of)\s+([A-Za-z0-9\s.]+)', question, re.IGNORECASE)
+        name_query = name_match.group(1).strip() if name_match else ""
+        if not name_query and len(question.split()) <= 3 and not any(kw in question.lower() for kw in ["how", "count", "list", "show all", "total", "what", "where", "our"]):
+            name_query = question.strip()
+            
+        tokens = [t.strip() for t in re.split(r'[\s%._]+', name_query) if len(t.strip()) > 2 and t.lower() not in ["family", "details", "member", "members", "the", "show", "our", "parish", "give", "list"]]
+        if tokens and user_parish:
+            import frappe
+            if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+                first_tok = tokens[0]
+                sql = """
+                    SELECT m.name AS member_id,
+                           CONCAT_WS(' ', m.first_name, NULLIF(m.middle_name, ''), m.last_name) AS full_name,
+                           m.relationship_id,
+                           m.age,
+                           f.family_card_number,
+                           f.parish_bcc_id AS anbiyam
+                    FROM tabMember m
+                    JOIN tabFamily f ON m.family_id = f.name
+                    WHERE (
+                        m.first_name = %s 
+                        OR m.first_name LIKE %s 
+                        OR m.first_name LIKE %s
+                        OR m.middle_name LIKE %s
+                        OR m.last_name LIKE %s
+                    )
+                    AND m.parish_id = %s
+                    ORDER BY 
+                        CASE 
+                            WHEN m.first_name = %s THEN 1 
+                            WHEN m.first_name LIKE %s THEN 2 
+                            ELSE 3 
+                        END,
+                        CASE 
+                            WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 
+                            WHEN m.relationship_id = 'Wife' THEN 2 
+                            ELSE 3 
+                        END,
+                        m.dob ASC
+                    LIMIT 10
+                """
+                prefix = f"{first_tok}%"
+                word_boundary = f"% {first_tok}%"
+                rows = frappe.db.sql(sql, (first_tok, prefix, word_boundary, prefix, prefix, user_parish, first_tok, prefix), as_dict=True)
+                
+                seen_fams = set()
+                candidates = []
+                for r in rows:
+                    fid = r.get("family_card_number") or r.get("member_id")
+                    if fid not in seen_fams:
+                        seen_fams.add(fid)
+                        candidates.append(r)
+                
+                if len(candidates) > 1:
+                    is_tam = bool(re.search(r'[\u0B80-\u0BFF]', question))
+                    for c in candidates[:3]:
+                        c_name = c.get('full_name', '').strip()
+                        c_card = c.get('family_card_number', '').strip()
+                        card_suffix = f" (Card #{c_card})" if c_card else ""
+                        if is_tam:
+                            name_suggestions.append(f"{c_name}{card_suffix} குடும்ப விவரங்கள்")
+                        else:
+                            name_suggestions.append(f"Family details of {c_name}{card_suffix}")
+    except Exception as d_err:
+        print(f"[generate_suggested_questions] Disambiguation helper error: {d_err}")
+
+    if len(name_suggestions) >= 2:
+        return name_suggestions[:3]
+
     parish_info = f"Assigned Parish: {user_parish}" if user_parish else "No single parish assigned"
     vicariate_info = f"Assigned Vicariate: {user_vicariate}" if user_vicariate else ""
     
