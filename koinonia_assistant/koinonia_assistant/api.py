@@ -177,7 +177,6 @@ def transcribe_audio():
     if has_audio_file:
         audio_file = frappe.request.files["audio"]
         if audio_file and audio_file.filename:
-            print(f"[Koinonia STT] Transcribing voice input: {audio_file.filename} ({audio_file.mimetype})...")
             sarvam_key = frappe.conf.get("sarvam_api_key")
             if not sarvam_key:
                 return {"error": "SarvamAI API Key is missing from site configuration."}
@@ -185,15 +184,42 @@ def transcribe_audio():
             url = "https://api.sarvam.ai/speech-to-text"
             headers = {"api-subscription-key": sarvam_key}
             audio_bytes = audio_file.read() if hasattr(audio_file, "read") else audio_file.stream.read()
-            if not audio_bytes or len(audio_bytes) < 100:
+            raw_mimetype = getattr(audio_file, "mimetype", "") or getattr(audio_file, "content_type", "") or "audio/webm"
+            # Strip codec parameters: 'audio/webm;codecs=opus' -> 'audio/webm'
+            clean_mimetype = raw_mimetype.split(";")[0].strip().lower() if raw_mimetype else "audio/webm"
+            allowed_mimetypes = {
+                'audio/webm', 'video/webm', 'audio/wav', 'audio/x-wav', 'audio/wave',
+                'audio/mp4', 'audio/x-m4a', 'audio/mpeg', 'audio/mp3', 'audio/ogg',
+                'audio/opus', 'audio/flac', 'audio/aac', 'audio/amr'
+            }
+            if clean_mimetype not in allowed_mimetypes:
+                clean_mimetype = "audio/webm"
+
+            clean_filename = audio_file.filename or "voice_input.webm"
+            print(f"[Koinonia STT] Transcribing voice input: {clean_filename} (mimetype={clean_mimetype}, size={len(audio_bytes) if audio_bytes else 0} bytes)...")
+            
+            if not audio_bytes or len(audio_bytes) < 400:
+                print(f"[Koinonia STT] Audio rejected: too small ({len(audio_bytes) if audio_bytes else 0} bytes)")
                 return {"error": "No speech was detected. Please try again."}
 
-            files = {"file": (audio_file.filename or "voice_input.webm", audio_bytes, audio_file.mimetype or "audio/webm")}
+            files = {"file": (clean_filename, audio_bytes, clean_mimetype)}
             data = {"model": "saaras:v3", "mode": "codemix", "language_code": "unknown"}
             
             try:
                 response = requests.post(url, headers=headers, files=files, data=data, timeout=30)
-                response.raise_for_status()
+                if response.status_code != 200:
+                    print(f"[Koinonia STT] Sarvam error: status={response.status_code}, body={response.text}")
+                    try:
+                        err_json = response.json()
+                        err_msg = err_json.get("error", {}).get("message", "")
+                    except Exception:
+                        err_msg = response.text
+                    if "audio format" in err_msg.lower() or "file type" in err_msg.lower():
+                        return {"error": "Could not process audio format. Please try again."}
+                    elif "no speech" in err_msg.lower() or "silent" in err_msg.lower():
+                        return {"error": "No speech was detected. Please try again."}
+                    return {"error": "Could not understand the recording."}
+
                 res_json = response.json()
                 transcript = (res_json.get("transcript") or "").strip()
                 print(f"[Koinonia STT] Transcript received: '{transcript}'")
@@ -214,7 +240,7 @@ def transcribe_audio():
                 return {"transcript": norm_transcript, "raw_transcript": transcript}
             except requests.exceptions.RequestException as e:
                 print(f"[Koinonia STT] Upload / Network Error: {e}")
-                return {"error": "Audio upload failed. Check your connection."}
+                return {"error": "Audio service temporarily unavailable. Check your connection."}
             except Exception as e:
                 print(f"[Koinonia STT] Transcription Error: {e}")
                 return {"error": "Could not understand the recording."}
@@ -243,20 +269,37 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
             if not sarvam_key:
                 return {"error": "SarvamAI API Key is missing from site configuration."}
             
+            audio_bytes = audio_file.read() if hasattr(audio_file, "read") else audio_file.stream.read()
+            raw_mimetype = getattr(audio_file, "mimetype", "") or getattr(audio_file, "content_type", "") or "audio/webm"
+            clean_mimetype = raw_mimetype.split(";")[0].strip().lower() if raw_mimetype else "audio/webm"
+            allowed_mimetypes = {
+                'audio/webm', 'video/webm', 'audio/wav', 'audio/x-wav', 'audio/wave',
+                'audio/mp4', 'audio/x-m4a', 'audio/mpeg', 'audio/mp3', 'audio/ogg',
+                'audio/opus', 'audio/flac', 'audio/aac', 'audio/amr'
+            }
+            if clean_mimetype not in allowed_mimetypes:
+                clean_mimetype = "audio/webm"
+
+            clean_filename = audio_file.filename or "voice_input.webm"
+            if not audio_bytes or len(audio_bytes) < 400:
+                return {"error": "Recording was too short. Please speak clearly."}
+
             url = "https://api.sarvam.ai/speech-to-text"
             headers = {"api-subscription-key": sarvam_key}
-            files = {"file": (audio_file.filename, audio_file.stream, audio_file.mimetype)}
+            files = {"file": (clean_filename, audio_bytes, clean_mimetype)}
             data = {"model": "saaras:v3", "mode": "codemix", "language_code": "unknown"}
             
             try:
-                response = requests.post(url, headers=headers, files=files, data=data)
-                response.raise_for_status()
+                response = requests.post(url, headers=headers, files=files, data=data, timeout=30)
+                if response.status_code != 200:
+                    print(f"[Koinonia Chat] Sarvam error: {response.status_code} {response.text}")
+                    return {"error": "Could not understand audio recording. Please try again."}
                 res_json = response.json()
                 query_text = res_json.get("transcript")
                 print(f"[Koinonia Chat] Audio transcribed to: '{query_text}'")
             except Exception as e:
                 print(f"[Koinonia Chat] Audio transcription error: {e}")
-                return {"error": f"Failed to transcribe audio: {str(e)}"}
+                return {"error": "Failed to transcribe audio. Please check your connection."}
 
     if not query_text:
         return {"error": "No text or audio query provided."}

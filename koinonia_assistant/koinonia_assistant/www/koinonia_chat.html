@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
         <!-- Progressive Web App (PWA) Meta & Manifest -->
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#07090e" id="meta-theme-color">
@@ -11,7 +11,9 @@
     <meta name="apple-mobile-web-app-title" content="KOINONIA">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="application-name" content="KOINONIA">
-    <link rel="apple-touch-icon" href="/icons/icon-192.svg">
+    <link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png">
+    <link rel="apple-touch-icon" sizes="512x512" href="/icons/icon-512.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
     <title>KOINONIA — Parish & Diocesan Assistant</title>
     
@@ -35,6 +37,24 @@
     <!-- Frappe CSRF Token & User Context baked server-side via Jinja -->
     <script>
 
+        // Sync dynamic mobile viewport height so .chat-header never scrolls out of view
+        function syncMobileViewportHeight() {
+            const vh = (window.visualViewport && window.visualViewport.height)
+                ? window.visualViewport.height
+                : window.innerHeight;
+            document.documentElement.style.setProperty('--app-height', vh + 'px');
+            if (window.scrollY > 0) {
+                window.scrollTo(0, 0);
+            }
+        }
+        window.addEventListener('resize', syncMobileViewportHeight);
+        window.addEventListener('orientationchange', syncMobileViewportHeight);
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', syncMobileViewportHeight);
+            window.visualViewport.addEventListener('scroll', syncMobileViewportHeight);
+        }
+        syncMobileViewportHeight();
+
         window.executeSuggestion = function(queryText) {
             if (typeof setQuickQuery === 'function') {
                 setQuickQuery(queryText);
@@ -54,6 +74,7 @@
         window._current_user_badge = "{{ badge_text or '' }}";
         
         document.addEventListener('DOMContentLoaded', function() {
+            syncMobileViewportHeight();
             if (!window._csrf_token || window._csrf_token === 'None' || window._csrf_token === '') {
                 fetch('/api/method/frappe.auth.get_logged_user', {credentials: 'include'})
                     .then(r => r.json())
@@ -191,13 +212,18 @@
             padding: 0;
         }
 
-        body {
+        html, body {
             font-family: 'Plus Jakarta Sans', sans-serif;
             background-color: var(--bg-base);
             color: var(--text-main);
+            width: 100%;
             height: 100vh;
+            height: 100dvh;
+            height: var(--app-height, 100dvh);
+            max-height: var(--app-height, 100dvh);
             display: flex;
-            overflow: hidden;
+            overflow: hidden !important;
+            overscroll-behavior: none;
             -webkit-font-smoothing: antialiased;
             transition: background-color 0.3s ease, color 0.3s ease;
         }
@@ -232,9 +258,16 @@
             display: flex;
             width: 100%;
             height: 100vh;
+            height: 100dvh;
+            height: var(--app-height, 100dvh);
+            max-height: var(--app-height, 100dvh);
             max-width: 100vw;
-            position: relative;
-            overflow: hidden;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            overflow: hidden !important;
             background-color: var(--bg-base);
         }
 
@@ -480,6 +513,8 @@
             flex: 1;
             min-width: 0;
             height: 100%;
+            max-height: 100%;
+            overflow: hidden;
             display: flex;
             flex-direction: column;
             background-color: var(--bg-base);
@@ -507,6 +542,12 @@
         /* Chat Header */
         .chat-header {
             height: 70px;
+            min-height: 70px;
+            flex: 0 0 70px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 0;
+            width: 100%;
             padding: 0 25px;
             border-bottom: 1px solid var(--border-color);
             display: flex;
@@ -514,7 +555,8 @@
             justify-content: space-between;
             background-color: var(--bg-surface);
             backdrop-filter: blur(12px);
-            z-index: 5;
+            -webkit-backdrop-filter: blur(12px);
+            z-index: 95;
         }
 
         .header-left {
@@ -1424,6 +1466,141 @@
             color: var(--accent-gold);
         }
 
+        
+        /* Mobile Chrome Push-to-Talk (PTT) Voice Styles */
+        .input-btn.voice-btn {
+            touch-action: none !important;
+            -webkit-touch-callout: none !important;
+            -webkit-user-select: none !important;
+            user-select: none !important;
+            transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+        }
+
+        .input-btn.voice-btn.recording {
+            background: #dc2626 !important;
+            color: #ffffff !important;
+            transform: scale(1.12) !important;
+            box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.35), 0 0 20px rgba(220, 38, 38, 0.6) !important;
+            animation: pulsePttVoice 1.1s infinite !important;
+        }
+
+        @keyframes pulsePttVoice {
+            0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.6); }
+            70% { box-shadow: 0 0 0 12px rgba(220, 38, 38, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+        }
+
+        .ptt-status-pill {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 10px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(18, 19, 22, 0.95);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            color: #ffffff;
+            padding: 8px 18px;
+            border-radius: 9999px;
+            font-size: 0.86rem;
+            font-weight: 500;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+            z-index: 1000;
+            pointer-events: none;
+            white-space: nowrap;
+            transition: all 0.2s ease;
+        }
+
+        .ptt-status-pill.active {
+            display: flex;
+            animation: pttPillSlideUp 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes pttPillSlideUp {
+            from { opacity: 0; transform: translate(-50%, 8px) scale(0.96); }
+            to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+        }
+
+        .ptt-status-pill.recording {
+            border-color: rgba(239, 68, 68, 0.7);
+            box-shadow: 0 8px 28px rgba(239, 68, 68, 0.35);
+        }
+
+        .ptt-status-pill.cancel-hover {
+            background: rgba(185, 28, 28, 0.96);
+            border-color: #ef4444;
+            color: #fee2e2;
+        }
+
+        .ptt-status-pill.processing, .ptt-status-pill.sending {
+            border-color: rgba(212, 175, 55, 0.6);
+            color: var(--accent-gold);
+        }
+
+        .ptt-rec-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ef4444;
+            box-shadow: 0 0 10px #ef4444;
+            animation: pttDotPulse 0.9s infinite alternate;
+        }
+
+        @keyframes pttDotPulse {
+            from { opacity: 0.4; transform: scale(0.85); }
+            to { opacity: 1; transform: scale(1.18); }
+        }
+
+        .ptt-timer {
+            font-family: monospace;
+            color: #cbd5e1;
+            font-size: 0.82rem;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 7px;
+            border-radius: 4px;
+        }
+
+        .ptt-spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            border-top-color: var(--accent-gold);
+            border-radius: 50%;
+            animation: pttSpin 0.7s linear infinite;
+        }
+
+        @keyframes pttSpin {
+            to { transform: rotate(360deg); }
+        }
+
+        .ptt-toast {
+            position: fixed;
+            bottom: 92px;
+            left: 50%;
+            transform: translateX(-50%) translateY(16px);
+            background: #1e293b;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            color: #f8fafc;
+            padding: 10px 22px;
+            border-radius: 10px;
+            font-size: 0.88rem;
+            font-weight: 500;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+            z-index: 2500;
+            opacity: 0;
+            pointer-events: none;
+            transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .ptt-toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+
         /* Modern Inline Voice Processing Bar (Exact Match with Voice UI Design) */
         .inline-voice-bar {
             display: none;
@@ -2257,14 +2434,42 @@
                 width: 100% !important;
                 max-width: 100vw !important;
                 min-width: 0 !important;
+                height: 100% !important;
+                max-height: var(--app-height, 100dvh) !important;
                 flex: 1 1 100% !important;
+                display: flex !important;
+                flex-direction: column !important;
+                overflow: hidden !important;
             }
             .chat-header {
-                padding: 0 12px !important;
-                height: 56px !important;
+                position: sticky !important;
+                top: 0 !important;
+                left: 0 !important;
+                right: 0 !important;
+                width: 100% !important;
+                padding: env(safe-area-inset-top, 0px) 12px 0 12px !important;
+                height: calc(56px + env(safe-area-inset-top, 0px)) !important;
+                min-height: calc(56px + env(safe-area-inset-top, 0px)) !important;
+                flex: 0 0 calc(56px + env(safe-area-inset-top, 0px)) !important;
+                flex-shrink: 0 !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                background-color: var(--bg-surface) !important;
+                border-bottom: 1px solid var(--border-color) !important;
+                z-index: 95 !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+            }
+            .chat-footer {
+                padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)) 12px !important;
+                flex-shrink: 0 !important;
             }
             .header-title {
                 font-size: 0.95rem !important;
+                white-space: nowrap !important;
+                overflow: hidden !important;
+                text-overflow: ellipsis !important;
             }
             .parish-badge {
                 display: none !important;
@@ -2472,6 +2677,7 @@
                 </div>
 
                 <div class="input-wrapper">
+                    <div class="ptt-status-pill" id="ptt-status-pill"></div>
                     <!-- Reply / Reference Banner -->
                     <div class="reference-banner" id="reference-banner" style="display: none;">
                         <div class="reference-content">
@@ -2509,7 +2715,7 @@
                         <textarea class="chat-input" id="chat-input" placeholder="Inquire about family registers, holy sacraments, or parishioners..." onkeydown="handleKeyPress(event)"></textarea>
                         
                         <div class="action-buttons">
-                            <button class="input-btn voice-btn" id="voice-btn" onclick="toggleVoiceRecord()" title="Dictate Query (Voice)">
+                            <button class="input-btn voice-btn" id="voice-btn" title="Push-to-Talk (Hold to speak, release to send)">
                                 <i data-lucide="mic" style="width: 20px; height: 20px;"></i>
                             </button>
                             <button class="input-btn send-btn" id="send-btn" onclick="handleSendOrStop(event)" title="Send Query">
@@ -2680,6 +2886,48 @@
             }
 
             renderSidebar();
+            loadHistoryFromServer();
+        }
+
+        function loadHistoryFromServer() {
+            const token = getCsrfToken();
+            const headers = {};
+            if (token) headers['X-Frappe-CSRF-Token'] = token;
+
+            fetch('/api/method/koinonia_assistant.api.get_user_chat_threads', {
+                method: 'GET',
+                headers: headers,
+                credentials: 'include'
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.message && data.message.threads_json) {
+                    try {
+                        const serverThreads = JSON.parse(data.message.threads_json);
+                        if (Array.isArray(serverThreads) && serverThreads.length > 0) {
+                            // If local threads empty or server has more conversations, adopt server data
+                            const hasLocalMsgs = threads.some(t => t && t.messages && t.messages.length > 0);
+                            if (!hasLocalMsgs || serverThreads.length > threads.length) {
+                                threads = serverThreads;
+                                try {
+                                    localStorage.setItem(getStorageKey(), JSON.stringify(threads));
+                                } catch(e) {}
+                                if (!activeThreadId && threads.length > 0) {
+                                    const withMsgs = threads.find(t => t && t.messages && t.messages.length > 0);
+                                    activeThreadId = withMsgs ? withMsgs.id : threads[0].id;
+                                }
+                                renderSidebar();
+                                if (activeThreadId) {
+                                    switchThread(activeThreadId);
+                                }
+                            }
+                        }
+                    } catch(pe) {
+                        console.warn("[Koinonia History] Parse error from server:", pe);
+                    }
+                }
+            })
+            .catch(err => console.warn("[Koinonia History] Server load error:", err));
         }
 
         let serverSyncTimer = null;
@@ -2723,7 +2971,14 @@
             list.innerHTML = '';
 
             if (threads.length === 0) {
-                list.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No previous chats</div>`;
+                list.innerHTML = `
+                    <div class="empty-history-state" style="padding: 36px 16px; text-align: center; color: var(--text-muted);">
+                        <div style="font-size: 1.8rem; margin-bottom: 8px; opacity: 0.7;">📖</div>
+                        <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-main); margin-bottom: 4px;">No previous chats</div>
+                        <div style="font-size: 0.72rem; line-height: 1.4; margin-bottom: 16px;">Your questions and sacrament queries will appear here.</div>
+                        <button onclick="startNewChat()" style="background: rgba(212, 175, 55, 0.15); border: 1px solid var(--accent-gold); color: var(--accent-gold); padding: 7px 14px; border-radius: 8px; font-size: 0.76rem; font-weight: 600; cursor: pointer;">+ New Conversation</button>
+                    </div>
+                `;
                 return;
             }
 
@@ -2966,11 +3221,17 @@
             const items = customList || getRoleStarterSuggestions();
             bar.innerHTML = items.map(item => {
                 const q = item.query || item.label;
+                let display = item.label || q;
+                if (display.includes("(ID:") || display.includes("(Show")) {
+                    display = display.replace(/\s*\(.*?ID:.*?\)/i, "");
+                    display = display.replace(/\s*\(Show.*?\)/i, "");
+                }
                 const safeQ = encodeURIComponent(q);
+                const safeDisplay = encodeURIComponent(display);
                 return `
-                    <button class="suggestion-chip" onclick="setQuickQuery(decodeURIComponent('${safeQ}'))" title="${escapeHtml(q)}">
+                    <button class="suggestion-chip" onclick="setQuickQuery(decodeURIComponent('${safeQ}'), decodeURIComponent('${safeDisplay}'))" title="${escapeHtml(display)}">
                         <span class="suggestion-chip-icon">${item.icon || '✨'}</span>
-                        <span>${escapeHtml(item.label || q)}</span>
+                        <span>${escapeHtml(display)}</span>
                     </button>
                 `;
             }).join('');
@@ -3125,7 +3386,7 @@
             switchThread(id);
         }
 
-        function setQuickQuery(text) {
+        function setQuickQuery(text, displayText = null) {
             if (!text) return;
             if (isGenerating) {
                 console.warn("A query is currently processing. Please wait.");
@@ -3133,18 +3394,34 @@
             }
             const input = document.getElementById('chat-input');
             if (input) input.value = text;
-            sendMessage(text);
+            sendMessage(text, displayText);
         }
 
 
         function toggleSidebar() {
             const sidebar = document.getElementById('sidebar');
+            const backdrop = document.getElementById('sidebar-backdrop');
             if (!sidebar) return;
-            sidebar.classList.toggle('collapsed');
-            const isCollapsed = sidebar.classList.contains('collapsed');
-            try {
-                localStorage.setItem('koinonia_sidebar_collapsed', isCollapsed ? 'true' : 'false');
-            } catch (e) {}
+
+            if (window.innerWidth <= 768) {
+                // Mobile Drawer Toggle
+                const isOpen = sidebar.classList.contains('open-mobile');
+                if (isOpen) {
+                    sidebar.classList.remove('open-mobile');
+                    if (backdrop) backdrop.classList.remove('active');
+                } else {
+                    sidebar.classList.add('open-mobile');
+                    if (backdrop) backdrop.classList.add('active');
+                    renderSidebar();
+                }
+            } else {
+                // Desktop Sidebar Toggle
+                sidebar.classList.toggle('collapsed');
+                const isCollapsed = sidebar.classList.contains('collapsed');
+                try {
+                    localStorage.setItem('koinonia_sidebar_collapsed', isCollapsed ? 'true' : 'false');
+                } catch (e) {}
+            }
             if (typeof lucide !== 'undefined') {
                 lucide.createIcons();
             }
@@ -3238,20 +3515,15 @@
             }
         }
 
-        let typingProgressTimer = null;
-
-        function appendTypingIndicator(threadId = null, queryText = '') {
+                        function appendTypingIndicator(threadId = null) {
             const targetThreadId = threadId || activeThreadId;
             activeTypingIndicatorThreadId = targetThreadId;
             
             const chatMessages = document.getElementById('chat-messages');
             if (!chatMessages) return null;
 
+            // Remove any existing typing indicator first
             removeTypingIndicator();
-
-            const qLow = (queryText || '').toLowerCase();
-            const isAnalytical = ['forecast', 'predict', 'trend', 'years', 'compare', 'comparison', 'statistics', 'historical', 'each year', 'every year'].some(k => qLow.includes(k));
-            const initialStatus = isAnalytical ? 'Analyzing historical records & running statistical models...' : 'Verifying diocesan database...';
 
             const typingId = 'typing-indicator-' + Date.now();
             const row = document.createElement('div');
@@ -3266,35 +3538,21 @@
 
             const bubble = document.createElement('div');
             bubble.className = 'message-bubble typing-bubble';
-            bubble.style.cssText = 'display: inline-flex !important; align-items: center !important; gap: 10px !important; padding: 12px 20px !important; background-color: var(--bubble-bot) !important; border: 1px solid var(--border-color) !important; border-radius: 16px !important; border-bottom-left-radius: 4px !important; box-shadow: var(--shadow-card) !important; z-index: 10 !important; visibility: visible !important; opacity: 1 !important;';
+            bubble.style.cssText = 'display: inline-flex !important; align-items: center !important; gap: 8px !important; padding: 12px 20px !important; background-color: var(--bubble-bot) !important; border: 1px solid var(--border-color) !important; border-radius: 16px !important; border-bottom-left-radius: 4px !important; box-shadow: var(--shadow-card) !important; z-index: 10 !important; visibility: visible !important; opacity: 1 !important;';
             bubble.innerHTML = `
                 <span class="dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent-gold); box-shadow:0 0 8px var(--accent-gold-glow); animation:dotFlashing 1.4s infinite ease-in-out both;"></span>
                 <span class="dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent-gold); box-shadow:0 0 8px var(--accent-gold-glow); animation:dotFlashing 1.4s infinite ease-in-out both; animation-delay:0.25s;"></span>
                 <span class="dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent-gold); box-shadow:0 0 8px var(--accent-gold-glow); animation:dotFlashing 1.4s infinite ease-in-out both; animation-delay:0.5s;"></span>
-                <span id="${typingId}-status" style="font-size: 0.84rem; color: var(--accent-gold); font-weight: 500; margin-left: 4px;">${initialStatus}</span>
             `;
 
             wrapper.appendChild(bubble);
             row.appendChild(wrapper);
             chatMessages.appendChild(row);
             scrollToBottom();
-
-            if (typingProgressTimer) clearTimeout(typingProgressTimer);
-            typingProgressTimer = setTimeout(() => {
-                const statusEl = document.getElementById(`${typingId}-status`);
-                if (statusEl) {
-                    statusEl.innerText = "The request is taking longer than expected. Still processing...";
-                }
-            }, 6000);
-
             return typingId;
         }
 
         function removeTypingIndicator(id = null) {
-            if (typingProgressTimer) {
-                clearTimeout(typingProgressTimer);
-                typingProgressTimer = null;
-            }
             if (id) {
                 const el = document.getElementById(id);
                 if (el) el.remove();
@@ -3459,9 +3717,12 @@
 
         function formatFriendlyError(err) {
             if (!err) {
-                return "🙏 I couldn't complete this query right now. Please try asking again or rephrasing your question in a moment! 😊";
+                return "Unable to process your question right now.";
             }
             const errStr = typeof err === 'string' ? err : (err.message || String(err));
+            if (errStr.includes("Unable to process") || errStr.includes("RAG") || errStr.includes("500") || errStr.includes("502")) {
+                return "Unable to process your question right now.";
+            }
             
             // HTML error pages / JSON syntax errors (502 Bad Gateway, 500 Server Error, Server restarting)
             if (errStr.includes("is not valid JSON") || errStr.includes("Unexpected token '<'") || errStr.includes("SyntaxError") || errStr.includes("502") || errStr.includes("500") || errStr.includes("504")) {
@@ -3486,7 +3747,7 @@
             return "🙏 I encountered a temporary issue while looking up the records for you. Please try rephrasing your question or ask again in a moment! 😊";
         }
 
-        function sendMessage(explicitText = null) {
+        function sendMessage(explicitText = null, explicitDisplayText = null, inputMode = 'chat') {
             if (isGenerating) {
                 console.warn("A query is currently processing. Please wait.");
                 return;
@@ -3496,6 +3757,9 @@
             const text = (explicitText !== null && typeof explicitText === 'string' && explicitText.trim())
                 ? explicitText.trim()
                 : (input ? input.value.trim() : '');
+            const displayText = (explicitDisplayText !== null && typeof explicitDisplayText === 'string' && explicitDisplayText.trim())
+                ? explicitDisplayText.trim()
+                : text;
 
             if (!text) return;
 
@@ -3543,30 +3807,18 @@
             saveHistory(); // Instantly persist to localStorage so switching tabs or reloads preserves pending state!
             
             const userMsgIdx = thread.messages.length - 1;
-            appendMessageToDOM('user', text, "", -1, null, [], userMsgIdx, refToSend, refAuthorToSend);
+            appendMessageToDOM('user', displayText, "", -1, null, [], userMsgIdx, refToSend, refAuthorToSend);
             clearReference();
             
             const targetThreadId = activeThreadId;
-            const requestId = (window.crypto && window.crypto.randomUUID)
-                ? window.crypto.randomUUID()
-                : ('req-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));
-            const reqStartTime = performance.now();
-
-            console.log("REQUEST SENT", {
-                request_id: requestId,
-                question: text,
-                thread_id: targetThreadId
-            });
-
-            // Append Typing Indicator with query-aware status
-            const typingId = appendTypingIndicator(targetThreadId, text);
+            // Append Typing Indicator
+            const typingId = appendTypingIndicator(targetThreadId);
             scrollToBottom();
 
             currentAbortController = new AbortController();
             activeThreadRequests.set(targetThreadId, {
                 abortController: currentAbortController,
                 threadId: targetThreadId,
-                requestId: requestId,
                 startTime: Date.now()
             });
             renderSidebar();
@@ -3586,19 +3838,11 @@
             function handleResponse(response) {
                 activeThreadRequests.delete(targetThreadId);
                 const targetThread = threads.find(t => t.id === targetThreadId);
-                const clientElapsedSec = ((performance.now() - reqStartTime) / 1000).toFixed(2);
-
-                console.log("RESPONSE RECEIVED", {
-                    request_id: response.request_id || requestId,
-                    trace_id: response.trace_id || "N/A",
-                    intent: response.intent || "GENERAL_DATABASE_QUERY",
-                    processing_time: response.processing_time || clientElapsedSec
-                });
-
+                
                 let botMsg;
                 if (response.error) {
                     const friendlyMessage = formatFriendlyError(response.error);
-                    botMsg = { role: 'bot', content: friendlyMessage, request_id: requestId };
+                    botMsg = { role: 'bot', content: friendlyMessage };
                 } else {
                     const reply = response.reply || "No reply returned from server.";
                     const sql = response.generated_sql || "";
@@ -3617,11 +3861,6 @@
                         query_id: query_id, 
                         feedback: null, 
                         data: data_rows, 
-                        chart: response.chart || null,
-                        intent: response.intent || null,
-                        request_id: response.request_id || requestId,
-                        trace_id: response.trace_id || null,
-                        processing_time: response.processing_time || clientElapsedSec,
                         suggested_questions: suggested_qs,
                         citations: citations,
                         groundedness_score: groundedness,
@@ -3663,13 +3902,14 @@
                 renderSidebar();
             }
 
+            console.log("[Koinonia] Dispatching via fetch for query in thread:", targetThreadId, text);
             const activeWs = document.getElementById('chat-workspace-select')?.value || 'WS-DEFAULT-DIOCESE';
             const formData = new FormData();
             formData.append('query_text', text);
-            formData.append('request_id', requestId);
             formData.append('history', JSON.stringify(payloadHistory));
             formData.append('reference_text', refToSend || "");
             formData.append('workspace_id', activeWs);
+            formData.append('input_mode', inputMode);
 
             const headers = {};
             const token = getCsrfToken();
@@ -3803,16 +4043,11 @@
                 textNode.innerText = formatUserDisplayMessage(content);
                 bubble.appendChild(textNode);
             } else {
-                // 1. Groundedness & Server-First Pipeline Verification Badge
+                // 1. Groundedness Confidence Badge
                 if (groundedness_score && groundedness_score >= 0.9) {
-                    const aThreadBadge = threads.find(t => t.id === activeThreadId);
-                    const badgeMsg = (aThreadBadge && typeof msgIndex === 'number') ? aThreadBadge.messages[msgIndex] : null;
-                    const intentTag = (badgeMsg && badgeMsg.intent) ? ` • <span style="opacity:0.9;">${escapeHtml(badgeMsg.intent)}</span>` : '';
-                    const timeTag = (badgeMsg && badgeMsg.processing_time) ? ` • <span style="opacity:0.85;">${escapeHtml(String(badgeMsg.processing_time))}s</span>` : '';
-                    const reqTag = (badgeMsg && badgeMsg.request_id) ? ` • <span style="opacity:0.75; font-family:monospace;">#${escapeHtml(String(badgeMsg.request_id).slice(0, 8))}</span>` : '';
                     const groundBadge = document.createElement('div');
                     groundBadge.className = 'groundedness-badge';
-                    groundBadge.innerHTML = `<i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> ✓ 100% Verified by Diocesan Database${intentTag}${timeTag}${reqTag}`;
+                    groundBadge.innerHTML = '<i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> ✓ 100% Verified by Diocesan Database';
                     bubble.appendChild(groundBadge);
                 }
 
@@ -3827,7 +4062,7 @@
                         </div>
                         <div class="disambig-list">
                             ${disambiguation.options.map(opt => `
-                                <div class="disambig-item" data-prompt="${encodeURIComponent(opt.prompt || '')}" onclick="setQuickQuery(decodeURIComponent(this.getAttribute('data-prompt')))">
+                                <div class="disambig-item" data-prompt="${encodeURIComponent(opt.prompt || '')}" data-display-text="${encodeURIComponent(opt.display_text || opt.prompt || '')}" onclick="setQuickQuery(decodeURIComponent(this.getAttribute('data-prompt')), decodeURIComponent(this.getAttribute('data-display-text')))">
                                     <div class="disambig-item-left" style="pointer-events: none;">
                                         <div class="disambig-avatar">
                                             <i data-lucide="${opt.type === 'member' ? 'user' : 'users'}" style="width: 18px; height: 18px;"></i>
@@ -3840,7 +4075,7 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="disambig-action-btn" onclick="event.stopPropagation(); setQuickQuery(decodeURIComponent(this.closest('.disambig-item').getAttribute('data-prompt')))">
+                                    <div class="disambig-action-btn" onclick="event.stopPropagation(); setQuickQuery(decodeURIComponent(this.closest('.disambig-item').getAttribute('data-prompt')), decodeURIComponent(this.closest('.disambig-item').getAttribute('data-display-text')))">
                                         <span>Select</span>
                                         <i data-lucide="chevron-right" style="width: 14px; height: 14px;"></i>
                                     </div>
@@ -4061,32 +4296,7 @@
                         }
                     }
                     
-                    const msgObjForChart = (activeThread && typeof msgIndex === 'number') ? activeThread.messages[msgIndex] : null;
-                    let chartConfig = null;
-                    if (msgObjForChart && msgObjForChart.chart && msgObjForChart.chart.x && msgObjForChart.chart.series) {
-                        const bc = msgObjForChart.chart;
-                        chartConfig = {
-                            type: bc.chart_type || 'line',
-                            indexAxis: 'x',
-                            xLabel: 'Year',
-                            yLabel: 'Records',
-                            labels: bc.x,
-                            datasets: bc.series.map((s, sIdx) => ({
-                                label: s.name || `Series ${sIdx + 1}`,
-                                data: s.values,
-                                borderColor: s.color || '#d4af37',
-                                backgroundColor: s.dashed ? 'transparent' : 'rgba(212, 175, 55, 0.14)',
-                                borderWidth: s.dashed ? 2 : 2.5,
-                                borderDash: s.dashed ? [6, 4] : [],
-                                fill: !s.dashed && bc.series.length === 1,
-                                tension: 0.3,
-                                pointRadius: s.dashed ? 3 : 5,
-                                spanGaps: true
-                            }))
-                        };
-                    } else {
-                        chartConfig = getChartableConfig(data, displayCols, lastUserText, false);
-                    }
+                    const chartConfig = getChartableConfig(data, displayCols, lastUserText, false);
                     let chartCanvas = null;
                     let chartContainer = null;
                     
@@ -4378,8 +4588,8 @@
                     }
                 }
 
-                // Append Suggested Follow-up Action Chips
-                if (role === 'bot') {
+                // Append Suggested Follow-up Action Chips (NEVER show during candidate disambiguation)
+                if (role === 'bot' && !hasDisambigCard) {
                     let lastUserMsg = '';
                     const curThread = threads.find(t => t.id === activeThreadId);
                     if (curThread && curThread.messages) {
@@ -4406,9 +4616,23 @@
                             } else {
                                 icon = icons[idx % icons.length];
                             }
+                            let displayLabel = q;
+                            let extractedCard = "";
+                            if (typeof q === "string") {
+                                const cardMatch = q.match(/Card:\s*([^)]+)/i);
+                                if (cardMatch) extractedCard = cardMatch[1];
+                                
+                                if (q.includes("(ID:") || q.includes("(Show")) {
+                                    displayLabel = q.replace(/\s*\(.*?ID:.*?\)/i, "");
+                                    displayLabel = displayLabel.replace(/\s*\(Show.*?\)/i, "");
+                                    if (extractedCard) {
+                                        displayLabel = displayLabel.trim() + ` (Family Card: ${extractedCard})`;
+                                    }
+                                }
+                            }
                             return {
                                 query: q,
-                                label: q,
+                                label: displayLabel,
                                 icon: icon
                             };
                         });
@@ -4425,7 +4649,7 @@
                                 Suggested Questions
                             </div>
                             ${followups.map(f => `
-                                <button class="followup-chip" onclick="setQuickQuery('${escapeHtml(f.query).replace(/'/g, "\\'")}')" title="${escapeHtml(f.query)}">
+                                <button class="followup-chip" onclick="setQuickQuery('${escapeHtml(f.query).replace(/'/g, "\\'")}', '${escapeHtml(f.label || f.query).replace(/'/g, "\\'")}')" title="${escapeHtml(f.query)}">
                                     <span>${f.icon || '✨'}</span>
                                     <span>${escapeHtml(f.label || f.query)}</span>
                                 </button>
@@ -5005,28 +5229,30 @@
             }, 50);
         }
 
-                        function getChartableConfig(data, columns, userQuery = '', forceChart = false) {
+        function getChartableConfig(data, columns, userQuery = '', forceChart = false) {
             if (!data || data.length < 2 || columns.length < 2) {
                 return null;
             }
             
             const q = (userQuery || '').toLowerCase();
-            const wantsChart = forceChart || 
-                               q.includes('chart') || q.includes('graph') || q.includes('diagram') || 
-                               q.includes('plot') || q.includes('trend') || q.includes('pie') || 
-                               q.includes('bar') || q.includes('visual') || q.includes('line') || 
-                               q.includes('draw') || q.includes('percentage') || q.includes('percent') || 
-                               q.includes('increase') || q.includes('decrease') ||
-                               q.includes('வரைபடம்') || q.includes('வரைபடத்தில்') || q.includes('விளக்கப்படம்') ||
-                               q.includes('வரைகோடு') || q.includes('வரைபு') || q.includes('சார்ட்') || 
-                               q.includes('பை சார்ட்') || q.includes('பார் சார்ட்') || q.includes('வரைபட') ||
-                               q.includes('வட்ட வரைபடம்') || q.includes('பட்டை வரைபடம்');
+            // Strictly match explicit chart / graph / visualization requests using word boundaries
+            // (prevents names like "Roseline" matching "line" or "Barbara" matching "bar")
+            const englishChartRegex = /\b(?:chart|charts|graph|graphs|diagram|diagrams|plot|plots|visualize|visualise|visualization|visualisation|pie\s*chart|bar\s*chart|line\s*graph|line\s*chart)\b/i;
+            const tamilChartKeywords = [
+                'வரைபடம்', 'வரைபடத்தில்', 'விளக்கப்படம்', 'வரைகோடு',
+                'வரைபு', 'சார்ட்', 'பை சார்ட்', 'பார் சார்ட்', 'வரைபட',
+                'வட்ட வரைபடம்', 'பட்டை வரைபடம்', 'காட்சிப்படுத்து'
+            ];
+            const wantsChart = forceChart ||
+                               englishChartRegex.test(q) ||
+                               tamilChartKeywords.some(kw => q.includes(kw));
                                
             if (!wantsChart) {
                 return null;
             }
             
-            const labelKeywords = ['year', 'date', 'month', 'day', 'time', 'period', 'parish', 'diocese', 'vicariate', 'sacrament', 'sacrament_name', 'gender', 'living_status', 'relationship', 'status', 'city', 'zone', 'bcc', 'parish_bcc_id', 'ஆண்டு', 'வருடம்', 'மாதம்', 'தேதி', 'பங்கு', 'மறைமாவட்டம்', 'மறைவட்டம்', 'பாலினம்', 'நிலை', 'பெயர்', 'விவரம்', 'திருவருட்சாதனம்', 'குடும்பம்', 'அன்பியம்', 'வகை'];
+            const labelKeywords = ['year', 'date', 'month', 'day', 'time', 'period', 'parish', 'diocese', 'vicariate', 'sacrament', 'sacrament_name', 'gender', 'living_status', 'relationship', 'status', 'city', 'zone', 'bcc', 'parish_bcc_id', 'full_name', 'name', 'ஆண்டு', 'வருடம்', 'மாதம்', 'தேதி', 'பங்கு', 'மறைமாவட்டம்', 'மறைவட்டம்', 'பாலினம்', 'நிலை', 'பெயர்', 'விவரம்', 'திருவருட்சாதனம்', 'குடும்பம்', 'அன்பியம்', 'வகை'];
+            const nonChartableColumns = ['mobile', 'phone', 'contact', 'cell', 'telephone', 'pincode', 'zipcode', 'card', 'register', 'member_id', 'family_id', 'id', 'serial', 'sno', 's_no'];
             const pctKeywords = ['pct', 'percent', 'percentage', 'growth', 'change', 'rate', 'diff', 'சதவீதம்', 'விகிதம்'];
             
             let numericCols = [];
@@ -5036,6 +5262,9 @@
             
             columns.forEach(col => {
                 const cLower = col.toLowerCase();
+                if (nonChartableColumns.some(kw => cLower.includes(kw))) {
+                    return;
+                }
                 if (labelKeywords.some(kw => cLower.includes(kw)) && !pctKeywords.some(kw => cLower.includes(kw))) {
                     labelCols.push(col);
                     return;
@@ -5302,169 +5531,535 @@
         let voiceAnalyser = null;
         let voiceAnimFrameId = null;
 
-        function toggleVoiceRecord() {
-            if (isRecording) {
-                stopAndSendRecording();
+        
+        // ════════════════════════════════════════════════════════════════════════
+        // MOBILE CHROME PUSH-TO-TALK (PTT) VOICE RECORDING ENGINE
+        // ════════════════════════════════════════════════════════════════════════
+        let isPttRecording = false;
+        let isPttCancelled = false;
+        let isPttProcessing = false;
+        let isPttToggleMode = false;
+        let pttPointerId = null;
+        let pttStartX = 0;
+        let pttStartY = 0;
+        let pttStartTime = 0;
+        let pttMediaRecorder = null;
+        let pttAudioChunks = [];
+        let pttAudioStream = null;
+        let pttSelectedMimeType = '';
+        let pttTimerInterval = null;
+        let pttTimerSeconds = 0;
+
+        function getSupportedAudioMimeType() {
+            const candidates = [
+                'audio/webm;codecs=opus',
+                'audio/webm',
+                'audio/mp4',
+                'audio/ogg;codecs=opus',
+                'audio/wav'
+            ];
+            if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
+                for (const mime of candidates) {
+                    if (MediaRecorder.isTypeSupported(mime)) {
+                        return mime;
+                    }
+                }
+            }
+            return '';
+        }
+
+        function normalizeClientSacramentQuery(text) {
+            if (!text || typeof text !== 'string') return text;
+            let t = text.trim();
+            // Client-side Sacrament phonetic & speech recognition error correction
+            const corrections = [
+                // Tamil STT misspellings -> Canonical Tamil
+                { re: /(?:பொதுநமை|பொதுநன்மை|பொது நன்மை|போதுநமை|போதுநன்மை|போது நன்மை|புதுனமை|புதுநமை|புது நன்மை|புதுநன்மை)/g, rep: 'புதுநன்மை' },
+                { re: /(?:நற்கருணை|நற்கருனை|நற் கருணை|நற் கருனை)/g, rep: 'நற்கருணை' },
+                { re: /(?:முதல் நற்கருணை|முதல் நற்கருனை|முதல்நற்கருணை|முதல்நற்கருனை)/g, rep: 'முதல் நற்கருணை' },
+                { re: /(?:ஞானஸ்நானம்|ஞானஸ்நான|ஞானஸ்னானம்|திருமுழுக்கு)/g, rep: 'ஞானஸ்நானம்' },
+                { re: /(?:உறுதிப்பூசுதல்|உறுதிபூசுதல்|உறுதிப் பூசுதல்)/g, rep: 'உறுதிப்பூசுதல்' },
+                { re: /(?:திருமணம்|விவாகம்|கல்யாணம்)/g, rep: 'திருமணம்' },
+                { re: /(?:இறப்பு|மரணம்|அடக்கம்|கல்லறை)/g, rep: 'இறப்பு' },
+                // Tanglish STT misspellings -> Canonical
+                { re: /\b(pothunamai|puthunamai|pothunanmai|puthunanmai|pothu nanmai|puthu nanmai|pothunmai|puthunmai)\b/gi, rep: 'புதுநன்மை' },
+                { re: /\b(gnanasnanam|nanananaam|gnana snanam)\b/gi, rep: 'ஞானஸ்நானம்' },
+                { re: /\b(uruthipoosuthal|uruti poosuthal)\b/gi, rep: 'உறுதிப்பூசுதல்' },
+                { re: /\b(thirumanam|kalyanam)\b/gi, rep: 'திருமணம்' }
+            ];
+            for (const c of corrections) {
+                t = t.replace(c.re, c.rep);
+            }
+            return t;
+        }
+
+        function updateVoiceStatusUI(state) {
+            const voiceBtn = document.getElementById('voice-btn');
+            const pill = document.getElementById('ptt-status-pill');
+            if (!pill) return;
+
+            if (state === 'recording' || state === 'recording-toggle') {
+                if (voiceBtn) voiceBtn.classList.add('recording');
+                pill.className = 'ptt-status-pill active recording';
+                const label = (state === 'recording-toggle') ? 'Listening... Tap mic to send' : 'Listening... Release to send';
+                pill.innerHTML = `<span class="ptt-rec-dot"></span><span>${label}</span><span class="ptt-timer" id="ptt-timer">00:00</span>`;
+            } else if (state === 'cancel-hover') {
+                if (voiceBtn) voiceBtn.classList.add('recording');
+                pill.className = 'ptt-status-pill active cancel-hover';
+                pill.innerHTML = '<span>✕ Release finger to cancel</span>';
+            } else if (state === 'processing') {
+                if (voiceBtn) voiceBtn.classList.remove('recording');
+                pill.className = 'ptt-status-pill active processing';
+                pill.innerHTML = '<span class="ptt-spinner"></span><span>Transcribing audio...</span>';
+            } else if (state === 'sending') {
+                if (voiceBtn) voiceBtn.classList.remove('recording');
+                pill.className = 'ptt-status-pill active sending';
+                pill.innerHTML = '<span class="ptt-spinner"></span><span>Sending query...</span>';
             } else {
-                startRecording();
+                if (voiceBtn) voiceBtn.classList.remove('recording');
+                pill.className = 'ptt-status-pill';
+                pill.innerHTML = '';
             }
         }
 
-        function startRecording() {
-            if (isGenerating) return;
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                const host = window.location.host;
-                if (!window.isSecureContext) {
-                    alert("🎙️ Microphone Access Requires Secure Context\n\nModern mobile browsers require HTTPS or a trusted local origin to enable the microphone.\n\nTo enable on Android Chrome:\n1. Open chrome://flags/#unsafely-treat-insecure-origin-as-secure in Chrome.\n2. Enter: http://" + host + "\n3. Select 'Enabled' and tap 'Relaunch'.\n\nMicrophone recording will then work immediately!");
-                } else {
-                    alert("Audio recording is not supported or permission was blocked on this browser.");
-                }
+        function updateVoiceTimerDisplay(seconds) {
+            const timerEl = document.getElementById('ptt-timer');
+            if (timerEl) {
+                const min = String(Math.floor(seconds / 60)).padStart(2, '0');
+                const sec = String(seconds % 60).padStart(2, '0');
+                timerEl.innerText = `${min}:${sec}`;
+            }
+        }
+
+        function showVoiceToast(msg) {
+            let toast = document.getElementById('ptt-toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'ptt-toast';
+                toast.className = 'ptt-toast';
+                document.body.appendChild(toast);
+            }
+            toast.innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3500);
+        }
+
+        // Pointer Event Handlers for Mobile Push-to-Talk and Tap-to-Talk
+        function handleVoicePointerDown(e) {
+            if (e.button !== undefined && e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (isGenerating || isPttProcessing) {
+                console.warn("[PTT] Chat is currently busy processing.");
                 return;
             }
 
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    activeAudioStream = stream;
-                    isRecording = true;
-                    audioChunks = [];
-                    mediaRecorder = new MediaRecorder(stream);
-                    
-                    mediaRecorder.ondataavailable = e => {
-                        if (e.data.size > 0) {
-                            audioChunks.push(e.data);
-                        }
-                    };
+            // If user is currently in Toggle Recording Mode, clicking the mic stops and sends!
+            if (isPttRecording && isPttToggleMode) {
+                stopPushToTalkAndSend();
+                return;
+            }
 
-                    mediaRecorder.onstop = () => {
-                        if (audioChunks.length > 0) {
-                            const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                            sendAudioMessage(audioBlob);
-                        }
-                        cleanupVoiceAudio();
-                    };
+            pttPointerId = e.pointerId;
+            const btn = document.getElementById('voice-btn');
+            if (btn && btn.setPointerCapture) {
+                try {
+                    btn.setPointerCapture(e.pointerId);
+                } catch (err) {}
+            }
 
-                    mediaRecorder.start();
+            pttStartX = e.clientX;
+            pttStartY = e.clientY;
+            isPttCancelled = false;
+            isPttToggleMode = false;
 
-                    // Switch UI from standard input to modern inline voice dock
-                    const stdInput = document.getElementById('standard-input-row');
-                    const voiceBar = document.getElementById('inline-voice-bar');
-                    if (stdInput) stdInput.style.display = 'none';
-                    if (voiceBar) voiceBar.style.display = 'flex';
-                    if (window.lucide) lucide.createIcons();
-
-                    // Initialize Dynamic Waveform Bars
-                    initWaveformVisualizer(stream);
-
-                    // Start Live Timer
-                    recordSeconds = 0;
-                    const timerEl = document.getElementById('voice-timer');
-                    if (timerEl) timerEl.innerText = "00:00";
-                    clearInterval(recordTimerInterval);
-                    recordTimerInterval = setInterval(() => {
-                        recordSeconds++;
-                        const min = String(Math.floor(recordSeconds / 60)).padStart(2, '0');
-                        const sec = String(recordSeconds % 60).padStart(2, '0');
-                        if (timerEl) timerEl.innerText = `${min}:${sec}`;
-                    }, 1000);
-                })
-                .catch(err => {
-                    console.error("Failed to access microphone:", err);
-                    alert("Could not access microphone. Please verify browser permissions.");
-                    cleanupVoiceAudio();
-                });
+            startPushToTalkRecording();
         }
 
-        function initWaveformVisualizer(stream) {
-            const barsContainer = document.getElementById('waveform-bars');
-            if (!barsContainer) return;
-            barsContainer.innerHTML = '';
+        function handleVoicePointerMove(e) {
+            if (!isPttRecording) return;
+            const deltaY = pttStartY - e.clientY;
+            const deltaX = Math.abs(pttStartX - e.clientX);
 
-            const numBars = 26;
-            const barElements = [];
-            for (let i = 0; i < numBars; i++) {
-                const bar = document.createElement('div');
-                bar.className = 'voice-bar';
-                barsContainer.appendChild(bar);
-                barElements.push(bar);
+            // User slides finger up by > 65px or sideways > 85px to cancel
+            if (deltaY > 65 || deltaX > 85) {
+                if (!isPttCancelled) {
+                    isPttCancelled = true;
+                    updateVoiceStatusUI('cancel-hover');
+                }
+            } else {
+                if (isPttCancelled) {
+                    isPttCancelled = false;
+                    updateVoiceStatusUI(isPttToggleMode ? 'recording-toggle' : 'recording');
+                }
+            }
+        }
+
+        function handleVoicePointerUp(e) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const btn = document.getElementById('voice-btn');
+            if (btn && pttPointerId !== null && btn.releasePointerCapture) {
+                try {
+                    btn.releasePointerCapture(pttPointerId);
+                } catch (err) {}
+            }
+            pttPointerId = null;
+
+            if (!isPttRecording) return;
+
+            if (isPttCancelled) {
+                cancelPushToTalkRecording("User cancelled by sliding finger away.");
+                return;
+            }
+
+            const pressDuration = Date.now() - pttStartTime;
+            if (pressDuration < 450) {
+                // Short tap (<450ms) -> Enter Toggle Mode (keep recording until user taps mic again)
+                isPttToggleMode = true;
+                updateVoiceStatusUI('recording-toggle');
+                return;
+            }
+
+            // Long hold (>=450ms) -> Push-to-Talk (release to send)
+            stopPushToTalkAndSend();
+        }
+
+        function handleVoicePointerCancel(e) {
+            const btn = document.getElementById('voice-btn');
+            if (btn && pttPointerId !== null && btn.releasePointerCapture) {
+                try {
+                    btn.releasePointerCapture(pttPointerId);
+                } catch (err) {}
+            }
+            pttPointerId = null;
+            if (!isPttToggleMode) {
+                cancelPushToTalkRecording("Pointer cancelled by browser.");
+            }
+        }
+
+        async function startPushToTalkRecording() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showVoiceToast("Microphone access is not supported on this browser.");
+                return;
             }
 
             try {
-                const AudioCtx = window.AudioContext || window.webkitAudioContext;
-                if (AudioCtx) {
-                    voiceAudioContext = new AudioCtx();
-                    const source = voiceAudioContext.createMediaStreamSource(stream);
-                    voiceAnalyser = voiceAudioContext.createAnalyser();
-                    voiceAnalyser.fftSize = 64;
-                    voiceAnalyser.smoothingTimeConstant = 0.65;
-                    source.connect(voiceAnalyser);
-
-                    const bufferLength = voiceAnalyser.frequencyBinCount;
-                    const dataArray = new Uint8Array(bufferLength);
-
-                    function renderWave() {
-                        if (!isRecording) return;
-                        voiceAnimFrameId = requestAnimationFrame(renderWave);
-                        voiceAnalyser.getByteFrequencyData(dataArray);
-
-                        for (let i = 0; i < numBars; i++) {
-                            const sampleIdx = Math.floor((i / numBars) * bufferLength);
-                            const rawVal = dataArray[sampleIdx] || 0;
-                            // Bell-curve weight: higher in middle, tapering toward sides
-                            const distFromCenter = Math.abs(i - (numBars - 1) / 2) / ((numBars - 1) / 2);
-                            const bellWeight = Math.cos(distFromCenter * Math.PI * 0.42);
-                            
-                            // Combine acoustic level with subtle live shimmer
-                            const waveShimmer = Math.sin(Date.now() * 0.009 + i * 0.35) * 2;
-                            const h = Math.max(5, Math.min(32, (rawVal / 255) * 34 * bellWeight + waveShimmer + 6));
-                            const opacity = Math.max(0.35, Math.min(1, 0.4 + (h / 32) * 0.6));
-                            
-                            barElements[i].style.height = `${h}px`;
-                            barElements[i].style.opacity = opacity;
-                        }
-                    }
-                    renderWave();
+                // Ensure previous stream is completely freed
+                if (pttAudioStream) {
+                    try {
+                        pttAudioStream.getTracks().forEach(t => t.stop());
+                    } catch(e) {}
+                    pttAudioStream = null;
                 }
-            } catch (e) {
-                console.warn("Live visualizer fallback:", e);
-                // Fallback CSS animation
-                barElements.forEach((bar, idx) => {
-                    bar.style.animation = `barPulse 1.2s infinite ease-in-out ${idx * 0.05}s`;
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
                 });
+
+                pttAudioStream = stream;
+                pttAudioChunks = [];
+                pttSelectedMimeType = getSupportedAudioMimeType();
+
+                const recorderOptions = pttSelectedMimeType ? { mimeType: pttSelectedMimeType } : {};
+                pttMediaRecorder = new MediaRecorder(stream, recorderOptions);
+
+                pttMediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        pttAudioChunks.push(event.data);
+                    }
+                };
+
+                pttMediaRecorder.onstop = handleMediaRecorderOnStop;
+
+                // Start recording continuously without timeslice fragmentation
+                pttMediaRecorder.start();
+                isPttRecording = true;
+                pttStartTime = Date.now();
+
+                updateVoiceStatusUI(isPttToggleMode ? 'recording-toggle' : 'recording');
+
+                if (navigator.vibrate) {
+                    try { navigator.vibrate(35); } catch(vErr) {}
+                }
+
+                pttTimerSeconds = 0;
+                clearInterval(pttTimerInterval);
+                pttTimerInterval = setInterval(() => {
+                    pttTimerSeconds++;
+                    updateVoiceTimerDisplay(pttTimerSeconds);
+                }, 1000);
+
+            } catch (err) {
+                console.error("[PTT] Failed to acquire microphone:", err);
+                cleanupVoiceRecording();
+                showVoiceToast("Microphone permission denied or device busy.");
             }
         }
 
-        function stopAndSendRecording() {
-            if (!isRecording) return;
-            isRecording = false;
-            clearInterval(recordTimerInterval);
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-            } else {
-                cleanupVoiceAudio();
+        function stopPushToTalkAndSend() {
+            if (!isPttRecording || !pttMediaRecorder) {
+                cleanupVoiceRecording();
+                return;
             }
-            // Restore standard input
-            const stdInput = document.getElementById('standard-input-row');
-            const voiceBar = document.getElementById('inline-voice-bar');
-            if (voiceBar) voiceBar.style.display = 'none';
-            if (stdInput) stdInput.style.display = 'flex';
+
+            isPttRecording = false;
+            isPttToggleMode = false;
+            clearInterval(pttTimerInterval);
+
+            // Request any buffered data before closing
+            if (pttMediaRecorder.state === 'recording') {
+                try {
+                    pttMediaRecorder.requestData();
+                } catch(e) {}
+            }
+
+            updateVoiceStatusUI('processing');
+
+            if (pttMediaRecorder.state !== 'inactive') {
+                try {
+                    pttMediaRecorder.stop();
+                } catch (e) {
+                    cleanupVoiceRecording();
+                }
+            }
         }
 
-        function cancelVoiceRecord() {
-            if (!isRecording) return;
-            isRecording = false;
-            clearInterval(recordTimerInterval);
-            audioChunks = [];
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.onstop = null; // Do not send
-                mediaRecorder.stop();
+        async function handleMediaRecorderOnStop() {
+            // IMMEDIATELY free microphone hardware tracks to prevent stream locking on Android
+            if (pttAudioStream) {
+                try {
+                    pttAudioStream.getTracks().forEach(track => track.stop());
+                } catch (e) {}
+                pttAudioStream = null;
             }
-            cleanupVoiceAudio();
-            // Restore standard input
-            const stdInput = document.getElementById('standard-input-row');
-            const voiceBar = document.getElementById('inline-voice-bar');
-            if (voiceBar) voiceBar.style.display = 'none';
-            if (stdInput) stdInput.style.display = 'flex';
+
+            if (isPttCancelled) {
+                cleanupVoiceRecording();
+                return;
+            }
+
+            // Brief wait to ensure ondataavailable has pushed all chunks
+            await new Promise(r => setTimeout(r, 80));
+
+            if (!pttAudioChunks || pttAudioChunks.length === 0) {
+                cleanupVoiceRecording();
+                showVoiceToast("No speech was detected. Please try again.");
+                return;
+            }
+
+            // Clean mime type to prevent ';codecs=opus' rejection by STT APIs
+            const rawMime = pttSelectedMimeType || 'audio/webm';
+            const cleanMime = rawMime.split(';')[0].trim().toLowerCase() || 'audio/webm';
+            const audioBlob = new Blob(pttAudioChunks, { type: cleanMime });
+
+            if (!audioBlob || audioBlob.size < 400) {
+                cleanupVoiceRecording();
+                showVoiceToast("Recording was too short. Please speak clearly.");
+                return;
+            }
+
+            let filename = 'voice_input.webm';
+            if (cleanMime.includes('mp4')) filename = 'voice_input.mp4';
+            else if (cleanMime.includes('ogg')) filename = 'voice_input.ogg';
+            else if (cleanMime.includes('wav')) filename = 'voice_input.wav';
+
+            await uploadVoiceAndAutoSubmit(audioBlob, filename);
         }
+
+        async function uploadVoiceAndAutoSubmit(audioBlob, filename) {
+            isPttProcessing = true;
+            updateVoiceStatusUI('processing');
+
+            const formData = new FormData();
+            formData.append('audio', audioBlob, filename);
+
+            const headers = {};
+            const token = getCsrfToken();
+            if (token) {
+                headers['X-Frappe-CSRF-Token'] = token;
+            }
+
+            let transcript = null;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 28000);
+
+            try {
+                let res = null;
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        res = await fetch('/api/method/koinonia_assistant.api.transcribe_audio', {
+                            method: 'POST',
+                            headers: headers,
+                            body: formData,
+                            credentials: 'include',
+                            signal: controller.signal
+                        });
+                        if (res.ok) break;
+                    } catch (fetchErr) {
+                        if (attempt === 0 && !controller.signal.aborted) {
+                            await new Promise(r => setTimeout(r, 600));
+                            continue;
+                        }
+                        throw fetchErr;
+                    }
+                }
+
+                clearTimeout(timeoutId);
+
+                if (!res || !res.ok) {
+                    showVoiceToast("Audio upload failed. Check your connection.");
+                    cleanupVoiceRecording();
+                    return;
+                }
+
+                const data = await res.json();
+                const msg = data.message || {};
+
+                if (msg.error) {
+                    console.warn("[PTT STT Error]", msg.error);
+                    if (msg.error.includes("No speech") || msg.error.includes("silent")) {
+                        showVoiceToast("No speech was detected. Please try again.");
+                    } else if (msg.error.includes("too short")) {
+                        showVoiceToast("Recording was too short. Please speak clearly.");
+                    } else if (msg.error.includes("format")) {
+                        showVoiceToast("Could not process audio format. Please try again.");
+                    } else if (msg.error.includes("connection") || msg.error.includes("unavailable")) {
+                        showVoiceToast("Audio service temporarily unavailable. Check your connection.");
+                    } else {
+                        showVoiceToast(msg.error || "Could not understand the recording.");
+                    }
+                    cleanupVoiceRecording();
+                    return;
+                }
+
+                transcript = (msg.transcript || msg.raw_transcript || "").trim();
+
+            } catch (err) {
+                clearTimeout(timeoutId);
+                console.error("[PTT Upload Exception]", err);
+                showVoiceToast("Audio upload failed. Check your connection.");
+                cleanupVoiceRecording();
+                return;
+            }
+
+            if (!transcript) {
+                showVoiceToast("No speech was detected. Please try again.");
+                cleanupVoiceRecording();
+                return;
+            }
+
+            // Normalization
+            const normalizedQuery = normalizeClientSacramentQuery(transcript);
+            console.log(`[PTT Voice Complete] Transcribed: '${transcript}' -> Normalized: '${normalizedQuery}'`);
+
+            // UI: "Sending..."
+            updateVoiceStatusUI('sending');
+
+            // Cleanup voice state before chat dispatch
+            cleanupVoiceRecording();
+
+            // Set text into chat input for user visibility
+            const chatInput = document.getElementById('chat-input');
+            if (chatInput) {
+                chatInput.value = normalizedQuery;
+            }
+
+            // AUTOMATIC SEND: User should NOT press Send separately!
+            sendMessage(normalizedQuery, null, 'voice');
+        }
+
+        function cancelPushToTalkRecording(reason = "") {
+            console.log("[PTT Cancelled]:", reason);
+            isPttRecording = false;
+            isPttCancelled = true;
+            isPttToggleMode = false;
+            clearInterval(pttTimerInterval);
+
+            if (pttMediaRecorder && pttMediaRecorder.state !== 'inactive') {
+                pttMediaRecorder.onstop = null; // Do not send audio
+                try { pttMediaRecorder.stop(); } catch(e) {}
+            }
+            cleanupVoiceRecording();
+        }
+
+        function cleanupVoiceRecording() {
+            isPttRecording = false;
+            isPttProcessing = false;
+            isPttCancelled = false;
+            isPttToggleMode = false;
+            clearInterval(pttTimerInterval);
+            pttAudioChunks = [];
+
+            if (pttAudioStream) {
+                try {
+                    pttAudioStream.getTracks().forEach(track => track.stop());
+                } catch (e) {}
+                pttAudioStream = null;
+            }
+            pttMediaRecorder = null;
+            updateVoiceStatusUI('idle');
+        }
+
+        function initPushToTalkVoiceEvents() {
+            const voiceBtn = document.getElementById('voice-btn');
+            if (!voiceBtn) return;
+
+            // Remove legacy attributes
+            voiceBtn.removeAttribute('onclick');
+
+            // Pointer Events for Mobile Android Chrome & Desktop
+            voiceBtn.addEventListener('pointerdown', handleVoicePointerDown, { passive: false });
+            voiceBtn.addEventListener('pointerup', handleVoicePointerUp, { passive: false });
+            voiceBtn.addEventListener('pointercancel', handleVoicePointerCancel, { passive: false });
+            voiceBtn.addEventListener('pointermove', handleVoicePointerMove, { passive: false });
+
+            // Prevent duplicate click events after pointerup
+            voiceBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+
+            // Prevent mobile context menu on long press
+            voiceBtn.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+
+            // Touch cancel safety
+            voiceBtn.addEventListener('touchcancel', handleVoicePointerCancel);
+
+            // Browser interruptions: backgrounding, tab switch, pagehide
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && isPttRecording) {
+                    cancelPushToTalkRecording("Interrupted by visibilitychange");
+                }
+            });
+
+            window.addEventListener('pagehide', () => {
+                if (isPttRecording) {
+                    cancelPushToTalkRecording("Interrupted by pagehide");
+                }
+            });
+
+            console.log("[PTT] Mobile Chrome Push-to-Talk voice listeners initialized successfully.");
+        }
+
+        // Initialize PTT on DOMContentLoaded or immediate
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initPushToTalkVoiceEvents);
+        } else {
+            initPushToTalkVoiceEvents();
+        }
+
 
         function cleanupVoiceAudio() {
             if (voiceAnimFrameId) {
@@ -5756,7 +6351,26 @@ function escapeHtml(text) {
 
                 const tbody = table.querySelector('tbody') || table;
                 const rows = Array.from(tbody.querySelectorAll('tr'));
-                const headerRow = rows.find(r => r.querySelector('th'));
+                const headerRow = rows.find(r => r.querySelector('th')) || table.querySelector('thead tr');
+                if (headerRow) {
+                    const ths = Array.from(headerRow.querySelectorAll('th'));
+                    const hideIdx = [];
+                    ths.forEach((th, idx) => {
+                        const txt = (th.textContent || '').trim().toLowerCase();
+                        if (['member id', 'member_id', 'family id', 'family_id', 'id', 'record id'].includes(txt)) {
+                            hideIdx.push(idx);
+                            th.style.display = 'none';
+                        }
+                    });
+                    if (hideIdx.length > 0) {
+                        Array.from(table.querySelectorAll('tr')).forEach(tr => {
+                            const cells = Array.from(tr.children);
+                            hideIdx.forEach(i => {
+                                if (cells[i]) cells[i].style.display = 'none';
+                            });
+                        });
+                    }
+                }
                 const dataRows = rows.filter(r => !r.querySelector('th') && !r.classList.contains('table-no-results-row'));
                 
                 // If table has no rows, nothing to do
@@ -5783,7 +6397,7 @@ function escapeHtml(text) {
                     searchWrapper.innerHTML = `
                         <div class="table-search-box">
                             <i data-lucide="search" class="table-search-icon"></i>
-                            <input type="text" class="table-search-input" placeholder="Search table (Name, ID, Parish, Date...)..." />
+                            <input type="text" class="table-search-input" placeholder="Search table (Name, Family Card, Parish, Date...)..." />
                             <button type="button" class="table-search-clear" style="display: none;" title="Clear search">
                                 <i data-lucide="x" style="width: 12px; height: 12px;"></i>
                             </button>

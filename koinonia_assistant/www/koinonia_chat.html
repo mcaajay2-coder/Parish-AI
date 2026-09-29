@@ -5538,6 +5538,7 @@
         let isPttRecording = false;
         let isPttCancelled = false;
         let isPttProcessing = false;
+        let isPttToggleMode = false;
         let pttPointerId = null;
         let pttStartX = 0;
         let pttStartY = 0;
@@ -5597,10 +5598,11 @@
             const pill = document.getElementById('ptt-status-pill');
             if (!pill) return;
 
-            if (state === 'recording') {
+            if (state === 'recording' || state === 'recording-toggle') {
                 if (voiceBtn) voiceBtn.classList.add('recording');
                 pill.className = 'ptt-status-pill active recording';
-                pill.innerHTML = '<span class="ptt-rec-dot"></span><span>Listening... Release to send</span><span class="ptt-timer" id="ptt-timer">00:00</span>';
+                const label = (state === 'recording-toggle') ? 'Listening... Tap mic to send' : 'Listening... Release to send';
+                pill.innerHTML = `<span class="ptt-rec-dot"></span><span>${label}</span><span class="ptt-timer" id="ptt-timer">00:00</span>`;
             } else if (state === 'cancel-hover') {
                 if (voiceBtn) voiceBtn.classList.add('recording');
                 pill.className = 'ptt-status-pill active cancel-hover';
@@ -5608,11 +5610,11 @@
             } else if (state === 'processing') {
                 if (voiceBtn) voiceBtn.classList.remove('recording');
                 pill.className = 'ptt-status-pill active processing';
-                pill.innerHTML = '<span class="ptt-spinner"></span><span>Processing...</span>';
+                pill.innerHTML = '<span class="ptt-spinner"></span><span>Transcribing audio...</span>';
             } else if (state === 'sending') {
                 if (voiceBtn) voiceBtn.classList.remove('recording');
                 pill.className = 'ptt-status-pill active sending';
-                pill.innerHTML = '<span class="ptt-spinner"></span><span>Sending...</span>';
+                pill.innerHTML = '<span class="ptt-spinner"></span><span>Sending query...</span>';
             } else {
                 if (voiceBtn) voiceBtn.classList.remove('recording');
                 pill.className = 'ptt-status-pill';
@@ -5644,9 +5646,8 @@
             }, 3500);
         }
 
-        // Pointer Event Handlers for Mobile Chrome Push-to-Talk
+        // Pointer Event Handlers for Mobile Push-to-Talk and Tap-to-Talk
         function handleVoicePointerDown(e) {
-            // Only primary touch/click button
             if (e.button !== undefined && e.button !== 0) return;
             e.preventDefault();
             e.stopPropagation();
@@ -5656,19 +5657,24 @@
                 return;
             }
 
+            // If user is currently in Toggle Recording Mode, clicking the mic stops and sends!
+            if (isPttRecording && isPttToggleMode) {
+                stopPushToTalkAndSend();
+                return;
+            }
+
             pttPointerId = e.pointerId;
             const btn = document.getElementById('voice-btn');
             if (btn && btn.setPointerCapture) {
                 try {
                     btn.setPointerCapture(e.pointerId);
-                } catch (err) {
-                    console.warn("[PTT] setPointerCapture failed:", err);
-                }
+                } catch (err) {}
             }
 
             pttStartX = e.clientX;
             pttStartY = e.clientY;
             isPttCancelled = false;
+            isPttToggleMode = false;
 
             startPushToTalkRecording();
         }
@@ -5687,7 +5693,7 @@
             } else {
                 if (isPttCancelled) {
                     isPttCancelled = false;
-                    updateVoiceStatusUI('recording');
+                    updateVoiceStatusUI(isPttToggleMode ? 'recording-toggle' : 'recording');
                 }
             }
         }
@@ -5711,6 +5717,15 @@
                 return;
             }
 
+            const pressDuration = Date.now() - pttStartTime;
+            if (pressDuration < 450) {
+                // Short tap (<450ms) -> Enter Toggle Mode (keep recording until user taps mic again)
+                isPttToggleMode = true;
+                updateVoiceStatusUI('recording-toggle');
+                return;
+            }
+
+            // Long hold (>=450ms) -> Push-to-Talk (release to send)
             stopPushToTalkAndSend();
         }
 
@@ -5722,16 +5737,26 @@
                 } catch (err) {}
             }
             pttPointerId = null;
-            cancelPushToTalkRecording("Pointer cancelled by browser.");
+            if (!isPttToggleMode) {
+                cancelPushToTalkRecording("Pointer cancelled by browser.");
+            }
         }
 
         async function startPushToTalkRecording() {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                showVoiceToast("Recording failed. Please try again.");
+                showVoiceToast("Microphone access is not supported on this browser.");
                 return;
             }
 
             try {
+                // Ensure previous stream is completely freed
+                if (pttAudioStream) {
+                    try {
+                        pttAudioStream.getTracks().forEach(t => t.stop());
+                    } catch(e) {}
+                    pttAudioStream = null;
+                }
+
                 const stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: true,
@@ -5739,12 +5764,6 @@
                         autoGainControl: true
                     }
                 });
-
-                // If finger was released before permission/stream resolved
-                if (pttPointerId === null) {
-                    stream.getTracks().forEach(t => t.stop());
-                    return;
-                }
 
                 pttAudioStream = stream;
                 pttAudioChunks = [];
@@ -5761,13 +5780,12 @@
 
                 pttMediaRecorder.onstop = handleMediaRecorderOnStop;
 
-                // Collect chunks in 100ms slices for responsive onstop
-                pttMediaRecorder.start(100);
+                // Start recording continuously without timeslice fragmentation
+                pttMediaRecorder.start();
                 isPttRecording = true;
                 pttStartTime = Date.now();
 
-                // UI: "Listening... Release to send"
-                updateVoiceStatusUI('recording');
+                updateVoiceStatusUI(isPttToggleMode ? 'recording-toggle' : 'recording');
 
                 if (navigator.vibrate) {
                     try { navigator.vibrate(35); } catch(vErr) {}
@@ -5783,7 +5801,7 @@
             } catch (err) {
                 console.error("[PTT] Failed to acquire microphone:", err);
                 cleanupVoiceRecording();
-                showVoiceToast("Recording failed. Please try again.");
+                showVoiceToast("Microphone permission denied or device busy.");
             }
         }
 
@@ -5794,31 +5812,43 @@
             }
 
             isPttRecording = false;
+            isPttToggleMode = false;
             clearInterval(pttTimerInterval);
 
-            const duration = Date.now() - pttStartTime;
-            if (duration < 400) {
-                cancelPushToTalkRecording("Tap too brief.");
-                showVoiceToast("Hold microphone to speak, release to send.");
-                return;
+            // Request any buffered data before closing
+            if (pttMediaRecorder.state === 'recording') {
+                try {
+                    pttMediaRecorder.requestData();
+                } catch(e) {}
             }
 
-            // UI: "Processing..."
             updateVoiceStatusUI('processing');
 
             if (pttMediaRecorder.state !== 'inactive') {
-                pttMediaRecorder.stop();
+                try {
+                    pttMediaRecorder.stop();
+                } catch (e) {
+                    cleanupVoiceRecording();
+                }
             }
         }
 
         async function handleMediaRecorderOnStop() {
+            // IMMEDIATELY free microphone hardware tracks to prevent stream locking on Android
+            if (pttAudioStream) {
+                try {
+                    pttAudioStream.getTracks().forEach(track => track.stop());
+                } catch (e) {}
+                pttAudioStream = null;
+            }
+
             if (isPttCancelled) {
                 cleanupVoiceRecording();
                 return;
             }
 
-            // Brief microtask wait to ensure final dataavailable chunk is pushed
-            await new Promise(r => setTimeout(r, 60));
+            // Brief wait to ensure ondataavailable has pushed all chunks
+            await new Promise(r => setTimeout(r, 80));
 
             if (!pttAudioChunks || pttAudioChunks.length === 0) {
                 cleanupVoiceRecording();
@@ -5826,19 +5856,21 @@
                 return;
             }
 
-            const finalMime = pttSelectedMimeType || 'audio/webm';
-            const audioBlob = new Blob(pttAudioChunks, { type: finalMime });
+            // Clean mime type to prevent ';codecs=opus' rejection by STT APIs
+            const rawMime = pttSelectedMimeType || 'audio/webm';
+            const cleanMime = rawMime.split(';')[0].trim().toLowerCase() || 'audio/webm';
+            const audioBlob = new Blob(pttAudioChunks, { type: cleanMime });
 
-            if (!audioBlob || audioBlob.size < 120) {
+            if (!audioBlob || audioBlob.size < 400) {
                 cleanupVoiceRecording();
-                showVoiceToast("No speech was detected. Please try again.");
+                showVoiceToast("Recording was too short. Please speak clearly.");
                 return;
             }
 
             let filename = 'voice_input.webm';
-            if (finalMime.includes('mp4')) filename = 'voice_input.mp4';
-            else if (finalMime.includes('ogg')) filename = 'voice_input.ogg';
-            else if (finalMime.includes('wav')) filename = 'voice_input.wav';
+            if (cleanMime.includes('mp4')) filename = 'voice_input.mp4';
+            else if (cleanMime.includes('ogg')) filename = 'voice_input.ogg';
+            else if (cleanMime.includes('wav')) filename = 'voice_input.wav';
 
             await uploadVoiceAndAutoSubmit(audioBlob, filename);
         }
@@ -5861,7 +5893,6 @@
             const timeoutId = setTimeout(() => controller.abort(), 28000);
 
             try {
-                // Resilient fetch with 1 safe retry for transient network switch
                 let res = null;
                 for (let attempt = 0; attempt < 2; attempt++) {
                     try {
@@ -5895,12 +5926,16 @@
 
                 if (msg.error) {
                     console.warn("[PTT STT Error]", msg.error);
-                    if (msg.error.includes("No speech")) {
+                    if (msg.error.includes("No speech") || msg.error.includes("silent")) {
                         showVoiceToast("No speech was detected. Please try again.");
-                    } else if (msg.error.includes("upload") || msg.error.includes("connection")) {
-                        showVoiceToast("Audio upload failed. Check your connection.");
+                    } else if (msg.error.includes("too short")) {
+                        showVoiceToast("Recording was too short. Please speak clearly.");
+                    } else if (msg.error.includes("format")) {
+                        showVoiceToast("Could not process audio format. Please try again.");
+                    } else if (msg.error.includes("connection") || msg.error.includes("unavailable")) {
+                        showVoiceToast("Audio service temporarily unavailable. Check your connection.");
                     } else {
-                        showVoiceToast("Could not understand the recording.");
+                        showVoiceToast(msg.error || "Could not understand the recording.");
                     }
                     cleanupVoiceRecording();
                     return;
@@ -5911,11 +5946,7 @@
             } catch (err) {
                 clearTimeout(timeoutId);
                 console.error("[PTT Upload Exception]", err);
-                if (err.name === 'AbortError') {
-                    showVoiceToast("Audio upload failed. Check your connection.");
-                } else {
-                    showVoiceToast("Audio upload failed. Check your connection.");
-                }
+                showVoiceToast("Audio upload failed. Check your connection.");
                 cleanupVoiceRecording();
                 return;
             }
@@ -5950,6 +5981,7 @@
             console.log("[PTT Cancelled]:", reason);
             isPttRecording = false;
             isPttCancelled = true;
+            isPttToggleMode = false;
             clearInterval(pttTimerInterval);
 
             if (pttMediaRecorder && pttMediaRecorder.state !== 'inactive') {
@@ -5963,6 +5995,7 @@
             isPttRecording = false;
             isPttProcessing = false;
             isPttCancelled = false;
+            isPttToggleMode = false;
             clearInterval(pttTimerInterval);
             pttAudioChunks = [];
 
