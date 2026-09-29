@@ -290,7 +290,12 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
             print(f"[Koinonia Chat] Warning: Failed to parse history: {he}")
 
     # 2. Resolve Role-Based Jurisdiction Boundaries (Sections 50–53)
-    user_email = frappe.session.user
+    user_email = kwargs.get("user_email") or (frappe.form_dict.get("user_email") if hasattr(frappe, "form_dict") and frappe.form_dict else None) or frappe.session.user
+    if user_email and user_email != frappe.session.user:
+        try:
+            frappe.set_user(user_email)
+        except Exception:
+            pass
     jurisdiction = resolve_user_jurisdiction(user_email)
     user_role = jurisdiction["user_role"]
     user_parish = jurisdiction["user_parish"]
