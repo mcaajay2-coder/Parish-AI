@@ -37,6 +37,101 @@ def resolve_user_parish(user_email):
         
     return None
 
+def resolve_user_jurisdiction(user_email):
+    """
+    Resolves role, parish, parishes, vicariate, and diocese for the user
+    strictly based on tabUser Permission and database records.
+    """
+    user_roles = frappe.get_roles(user_email) if user_email else []
+    
+    # 1. Check tabUser Permission
+    parish_perms = frappe.db.sql(
+        "SELECT for_value FROM `tabUser Permission` WHERE user=%s AND allow='Parish'", 
+        (user_email,), as_dict=True
+    ) if user_email else []
+    user_parishes = [p['for_value'] for p in parish_perms if p.get('for_value')]
+    user_parish = user_parishes[0] if user_parishes else None
+
+    diocese_perms = frappe.db.sql(
+        "SELECT for_value FROM `tabUser Permission` WHERE user=%s AND allow='Diocese'", 
+        (user_email,), as_dict=True
+    ) if user_email else []
+    user_dioceses = [d['for_value'] for d in diocese_perms if d.get('for_value')]
+    user_diocese = user_dioceses[0] if user_dioceses else None
+
+    vicariate_perms = frappe.db.sql(
+        "SELECT for_value FROM `tabUser Permission` WHERE user=%s AND allow='Vicariate'", 
+        (user_email,), as_dict=True
+    ) if user_email else []
+    user_vicariates = [v['for_value'] for v in vicariate_perms if v.get('for_value')]
+    user_vicariate = user_vicariates[0] if user_vicariates else None
+
+    # 2. Fallbacks for parish if not in User Permission
+    if not user_parish and user_email not in ['Administrator', 'admin@example.com']:
+        user_parish = resolve_user_parish(user_email)
+        if user_parish:
+            user_parishes = [user_parish]
+
+    # 3. Derive diocese & vicariate from user_parish (CRITICAL: Yelagiri Parish -> Vellore)
+    if user_parish:
+        p_row = frappe.db.sql(
+            "SELECT diocese_id, vicariate_id FROM `tabParish` WHERE name=%s LIMIT 1", 
+            (user_parish,), as_dict=True
+        )
+        if p_row:
+            if not user_diocese and p_row[0].get('diocese_id'):
+                user_diocese = p_row[0]['diocese_id']
+            if not user_vicariate and p_row[0].get('vicariate_id'):
+                user_vicariate = p_row[0]['vicariate_id']
+
+    # 4. Derive diocese from user_vicariate
+    if user_vicariate and not user_diocese:
+        v_row = frappe.db.sql(
+            "SELECT diocese_id FROM `tabVicariate` WHERE name=%s LIMIT 1", 
+            (user_vicariate,), as_dict=True
+        )
+        if v_row and v_row[0].get('diocese_id'):
+            user_diocese = v_row[0]['diocese_id']
+
+    # 5. Role determination
+    if user_email in ['Administrator', 'admin@example.com']:
+        user_role = "Administrator"
+        user_diocese = "All Dioceses"
+    elif "Bishop" in user_roles:
+        user_role = "Bishop"
+        if not user_diocese:
+            for d in ["Chennai", "Coimbatore", "Salem", "Trichy", "Vellore"]:
+                if d.lower() in user_email.lower():
+                    user_diocese = d
+                    break
+    elif "Vicar General" in user_roles or "Vicar Forane" in user_roles:
+        user_role = "Vicar General"
+        if not user_diocese:
+            for d in ["Chennai", "Coimbatore", "Salem", "Trichy", "Vellore"]:
+                if d.lower() in user_email.lower():
+                    user_diocese = d
+                    break
+    elif "Parish Priest" in user_roles:
+        user_role = "Parish Priest"
+    else:
+        user_role = "Parishioner"
+
+    # Default fallback for diocese if still unset
+    if not user_diocese:
+        if user_parish:
+            p_dio = frappe.db.get_value("Parish", user_parish, "diocese_id")
+            user_diocese = p_dio or "Vellore"
+        else:
+            user_diocese = "Trichy"
+
+    return {
+        "user_role": user_role,
+        "user_parish": user_parish,
+        "user_parishes": user_parishes,
+        "user_vicariate": user_vicariate,
+        "user_diocese": user_diocese
+    }
+
 import frappe
 from koinonia_assistant.rag.sacrament_normalizer import normalize_sacrament_query
 import requests
@@ -196,22 +291,17 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
 
     # 2. Resolve Role-Based Jurisdiction Boundaries (Sections 50–53)
     user_email = frappe.session.user
-    user_roles = frappe.get_roles(user_email)
-    
-    if "Bishop" in user_roles or user_email in ["Administrator", "admin@example.com"]:
-        user_role = "Bishop"
-        user_parish = None
-    elif "Parish Priest" in user_roles:
-        user_role = "Parish Priest"
-        user_parish = resolve_user_parish(user_email)
-    else:
-        user_role = "Parishioner"
-        user_parish = resolve_user_parish(user_email)
+    jurisdiction = resolve_user_jurisdiction(user_email)
+    user_role = jurisdiction["user_role"]
+    user_parish = jurisdiction["user_parish"]
+    user_diocese = jurisdiction["user_diocese"]
+    user_vicariate = jurisdiction["user_vicariate"]
+    user_parishes = jurisdiction["user_parishes"]
 
     _ensure_langsmith_env()
     import uuid
     req_id = kwargs.get("request_id") or (frappe.form_dict.get("request_id") if hasattr(frappe, "form_dict") and frappe.form_dict else None) or str(uuid.uuid4())
-    print(f"[BACKEND API] REQUEST RECEIVED | request_id={req_id} | lang={detected_lang} | input_mode={input_mode} | User={user_email} | Role={user_role} | Parish={user_parish} | original_query='{original_query}'")
+    print(f"[BACKEND API] REQUEST RECEIVED | request_id={req_id} | lang={detected_lang} | input_mode={input_mode} | User={user_email} | Role={user_role} | Parish={user_parish} | Diocese={user_diocese} | Vicariate={user_vicariate} | original_query='{original_query}'")
 
     # 3. Invoke LangGraph RAG pipeline with the EXACT original_query and input_mode
     try:
@@ -221,8 +311,12 @@ def process_message(text=None, query_text=None, message=None, history=None, refe
             history=parsed_history,
             user_role=user_role,
             user_parish=user_parish,
+            user_diocese=user_diocese,
+            user_vicariate=user_vicariate,
+            user_parishes=user_parishes,
             request_id=req_id,
             user_id=user_email,
+            user_email=user_email,
             input_mode=input_mode,
             original_transcript=original_query if input_mode == "voice" else None,
         )

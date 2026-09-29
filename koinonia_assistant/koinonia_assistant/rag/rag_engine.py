@@ -1103,7 +1103,20 @@ def generate_sql_node(state: GraphState) -> GraphState:
                         return {**state, "generated_sql": "UNAUTHORIZED_PARISH"}
 
     # Pre-check for foreign diocese or foreign parish requests (e.g., Bishop of Salem asking for Christ the King Parish in Trichy)
-    user_diocese = (state.get("user_diocese") or "Trichy").strip()
+    user_parish = (state.get("user_parish") or "").strip()
+    user_diocese = (state.get("user_diocese") or "").strip()
+    if not user_diocese and user_parish:
+        try:
+            ensure_frappe_db()
+            import frappe
+            if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+                p_dio = frappe.db.get_value("Parish", user_parish, "diocese_id")
+                if p_dio:
+                    user_diocese = p_dio
+        except Exception:
+            pass
+    if not user_diocese:
+        user_diocese = "Trichy"
     
     all_parishes = []
     try:
@@ -1142,7 +1155,7 @@ def generate_sql_node(state: GraphState) -> GraphState:
                 print(f"[generate_sql] Access Restricted: User {user_role} of {user_diocese} requested unauthorized diocese '{d}': raw='{q_raw}'")
                 return {**state, "generated_sql": "UNAUTHORIZED_DIOCESE", "requested_foreign_diocese": d.title()}
 
-    parish_context = state.get("user_parish") or ""
+    parish_context = user_parish
     if user_role in ["Vicar General", "Vicar Forane"] and user_parishes:
         parish_context = "IN (" + ", ".join([f"'{p}'" for p in user_parishes]) + ")"
 
@@ -1151,7 +1164,7 @@ def generate_sql_node(state: GraphState) -> GraphState:
         relevant_fields="\n".join(state["relevant_fields"]),
         few_shot_examples=state["few_shot_examples"],
         user_role=state.get("user_role") or "Parish Priest",
-        user_diocese=state.get("user_diocese") or "Trichy",
+        user_diocese=user_diocese,
         user_parish=parish_context,
         user_vicariate=state.get("user_vicariate") or "",
         user_member_id=state.get("user_member_id") or "",
@@ -1270,17 +1283,35 @@ def sql_quote_str(val: str) -> str:
 
 def enforce_jurisdiction_sql_single(sql: str, state: GraphState) -> str:
     user_role = state.get("user_role") or "Parish Priest"
-    user_diocese = state.get("user_diocese") or "Trichy"
+    user_parish = (state.get("user_parish") or "").strip()
+    user_diocese = (state.get("user_diocese") or "").strip()
     user_vicariate = state.get("user_vicariate") or ""
-    user_parish = state.get("user_parish") or "Christ the King Parish"
     user_parishes = state.get("user_parishes") or []
     
+    if not user_diocese and user_parish:
+        try:
+            ensure_frappe_db()
+            import frappe
+            if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+                p_dio = frappe.db.get_value("Parish", user_parish, "diocese_id")
+                if p_dio:
+                    user_diocese = p_dio
+        except Exception:
+            pass
+    if not user_diocese:
+        user_diocese = "Trichy"
+
     if user_role in ["Administrator", "System Manager"] or user_diocese in ["All Dioceses", "All"]:
         return sql
         
     sql_upper = sql.upper()
     if not sql_upper.startswith("SELECT") or sql in ["UNSUPPORTED", "UNAUTHORIZED_DIOCESE", "UNAUTHORIZED_PARISH"]:
         return sql
+
+    # If the LLM mistakenly generated a conflicting diocese_id, correct it to the user's actual diocese_id
+    if user_diocese and user_role not in ["Administrator", "System Manager"]:
+        sql = re.sub(r"\bdiocese_id\s*=\s*['\"][^'\"]*['\"]", f"diocese_id = {sql_quote_str(user_diocese)}", sql, flags=re.IGNORECASE)
+        sql_upper = sql.upper()
         
     alias_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_]+(?:\s+Of\s+Sick)?)`?(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?', sql, re.IGNORECASE)
     if not alias_match:
@@ -2437,6 +2468,23 @@ app = build_graph()
 def run_query(question: str, history: list = None, reference_text: str = None, user_role: str = "Parish Priest", user_parish: str = None, user_vicariate: str = None, user_diocese: str = None, user_parishes: list = None, user_member_id: str = None, user_email: str = None, **kwargs) -> dict:
     app = build_graph()
     
+    # Resolve diocese and vicariate from parish if missing (e.g. Yelagiri Parish -> Vellore)
+    if user_parish and not user_diocese:
+        try:
+            ensure_frappe_db()
+            import frappe
+            if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+                p_info = frappe.db.sql("SELECT diocese_id, vicariate_id FROM `tabParish` WHERE name=%s LIMIT 1", (user_parish,), as_dict=True)
+                if p_info:
+                    if p_info[0].get("diocese_id"):
+                        user_diocese = p_info[0]["diocese_id"]
+                    if not user_vicariate and p_info[0].get("vicariate_id"):
+                        user_vicariate = p_info[0]["vicariate_id"]
+        except Exception:
+            pass
+    if not user_diocese:
+        user_diocese = "Trichy"
+
     # 1. Embed query to check if it's already in history
     embedding = embed_text(question)
     
