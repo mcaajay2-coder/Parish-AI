@@ -402,7 +402,7 @@ def fetch_relevant_schemas(original_query: str, enhanced_query: str, query_embed
                 continue
             if not any(sc in line_str.lower() for sc in system_cols):
                 clean_lines.append(line_str)
-        pruned_results.append(f"Table `{tname}`:\n" + "\n".join(clean_lines[:8]))
+        pruned_results.append(f"Table `{tname}`:\n" + "\n".join(clean_lines[:30]))
         
     return pruned_results
 
@@ -467,13 +467,15 @@ def fetch_relevant_fields(query_embedding: list[float], combined_query_text: str
         conn.close()
     return results
 
-def fetch_few_shot_examples(query_embedding: list[float], k: int = 1) -> str:
+def fetch_few_shot_examples(query_embedding: list[float], k: int = 3) -> str:
     lines = [
         "Example Mappings:",
         "  Q: \"Count how many baptisms were conducted in Holy Cross Parish during 2024\"",
         "  SQL: SELECT COUNT(*) FROM tabBaptism WHERE bapt_parish_id = 'Holy Cross Parish' AND YEAR(bapt_date) = 2024",
         "  Q: \"Tell me about Paul Amalraj S.\"",
-        "  SQL: SELECT first_name, middle_name, last_name, dob, gender, living_status, parish_id, mobile FROM tabMember WHERE (first_name = 'Paul' AND middle_name = 'Amalraj' AND last_name = 'S.') OR CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%Paul%Amalraj%'"
+        "  SQL: SELECT first_name, middle_name, last_name, dob, gender, living_status, parish_id, mobile FROM tabMember WHERE (first_name = 'Paul' AND middle_name = 'Amalraj' AND last_name = 'S.') OR CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE '%Paul%Amalraj%'",
+        "  Q: \"Show family details and household members of Agnes Mary A\"",
+        "  SQL: SELECT m.name AS member_id, CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS full_name, m.relationship_id AS relationship, m.gender, m.age, m.dob, m.mobile, f.family_card_number, f.parish_bcc_id AS anbiyam, f.street, f.city, m.parish_id FROM tabMember m JOIN tabFamily f ON m.family_id = f.name WHERE m.family_id = (SELECT family_id FROM tabMember WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%Agnes Mary%' OR first_name LIKE '%Agnes%') AND parish_id = 'Yelagiri Parish' LIMIT 1) AND m.parish_id = 'Yelagiri Parish' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC"
     ]
     
     conn = psycopg2.connect(**PG_CONFIG)
@@ -849,6 +851,21 @@ def clean_church_query_text(text: str) -> str:
         (r'\bகுடும்ப\s*அட்டை\b', 'family card number (family_card_no)'),
         (r'\bகடந்த\s*(?:வருடம்|ஆண்டு)\b', 'last year'),
         (r'\bபோன\s*வருடம்\b', 'last year'),
+        (r'\bகுடும்ப\s*(?:விவரங்கள்|விபரம்|விபரங்கள்)\b', 'family details and members'),
+        (r'\bகுடும்ப\s*உறுப்பினர்கள்\b', 'family members'),
+        (r'\bஉறுப்பினர்கள்?\s*(?:விவரங்கள்|விபரம்|விபரங்கள்)\b', 'member details'),
+        (r'\bஉறுப்பினர்கள்?\s*பட்டியல்\b', 'list of members with details'),
+        (r'ஆக்னஸ்', 'Agnes'),
+        (r'சூசையப்பர்', 'Joseph'),
+        (r'சூசை', 'Joseph'),
+        (r'அந்தோணி', 'Antony'),
+        (r'அந்தோனி', 'Antony'),
+        (r'சவேரியார்', 'Xavier'),
+        (r'பிரான்சிஸ்', 'Francis'),
+        (r'மேரி', 'Mary'),
+        (r'மரியா', 'Mary'),
+        (r'மரியாள்', 'Mary'),
+        (r'\bagnus\b', 'Agnes'),
     ]
     cleaned = text
     for pat, rep in fixes:
@@ -1031,11 +1048,36 @@ SQL_GEN_PROMPT = ChatPromptTemplate.from_messages([
 41. Bride / groom religion: `WHERE bridegroom_religion_id != 'Catholic'` in tabMarriage.
 42. Multi-sacrament completion: Query `tabMember` directly `WHERE bapt_date IS NOT NULL AND fhc_date IS NOT NULL AND cnf_date IS NOT NULL`.
 43. Apostrophes in names (D'Souza, St. Mary's): Escape single quotes in SQL literals: `LIKE '%Souza%'` or `\'`.
-44. Family members list: `SELECT m.first_name, m.middle_name, m.last_name, m.relationship_id, m.gender, m.age FROM tabMember m WHERE m.family_id = '[family_id]'`.
-45. Relationship between two persons: `SELECT CONCAT_WS(' ', m1.first_name, NULLIF(m1.middle_name, ''), m1.last_name) AS person1_fullname, m1.relationship_id AS relationship1, m1.parish_id AS parish_name, CONCAT_WS(' ', m2.first_name, NULLIF(m2.middle_name, ''), m2.last_name) AS person2_fullname, m2.relationship_id AS relationship2, m1.family_id, m1.diocese_id FROM tabMember m1 JOIN tabMember m2 ON m1.family_id = m2.family_id WHERE (m1.first_name LIKE '%[name1]%') AND (m2.first_name LIKE '%[name2]%') LIMIT 1`.
-46. Single Diocese Profile: `SELECT diocese_name, bishop_name, established_date, city, phone, email, website, note FROM tabDiocese WHERE (name LIKE '%[diocese]%' OR diocese_name LIKE '%[diocese]%') LIMIT 1`.
-47. Listing all Dioceses: `SELECT diocese_name, bishop_name, established_date, city, phone, email FROM tabDiocese ORDER BY diocese_name ASC`.
-48. Multi-Sacrament Counts / Summary: `UNION ALL` across tabBaptism, tabCommunion, tabConfirmation, tabMarriage, tabDeath, `tabAnointing Of Sick`.
+44. Family details & household members of a person:
+    - When user asks for "family details of [Person Name]", "family members of [Person Name]", "[Person Name] குடும்ப விவரங்கள்", or "[Person Name] குடும்ப உறுப்பினர்கள்":
+    - The person is a member in tabMember (wife, child, husband, or head).
+    - NEVER query tabFamily WHERE family_head_name = '[Person Name]'.
+    - NEVER put LIMIT 1 on the outer query (that drops the other family members!).
+    - ALWAYS locate the member's family_id from tabMember, and JOIN tabMember m with tabFamily f on m.family_id = f.name to return ALL members in that household with family metadata:
+      SELECT m.name AS member_id, CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS full_name, m.relationship_id AS relationship, m.gender, m.age, m.dob, m.mobile, f.family_card_number, f.parish_bcc_id AS anbiyam, f.street, f.city, m.parish_id FROM tabMember m JOIN tabFamily f ON m.family_id = f.name WHERE m.family_id = (SELECT family_id FROM tabMember WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Person Name]%' OR first_name LIKE '%[First Token]%') AND parish_id = '{user_parish}' LIMIT 1) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
+45. Relationship between two persons: SELECT CONCAT_WS(' ', m1.first_name, NULLIF(m1.middle_name, ''), m1.last_name) AS person1_fullname, m1.relationship_id AS relationship1, m1.parish_id AS parish_name, CONCAT_WS(' ', m2.first_name, NULLIF(m2.middle_name, ''), m2.last_name) AS person2_fullname, m2.relationship_id AS relationship2, m1.family_id, m1.diocese_id FROM tabMember m1 JOIN tabMember m2 ON m1.family_id = m2.family_id WHERE (m1.first_name LIKE '%[name1]%') AND (m2.first_name LIKE '%[name2]%') LIMIT 1.
+46. Single Diocese Profile: SELECT diocese_name, bishop_name, established_date, city, phone, email, website, note FROM tabDiocese WHERE (name LIKE '%[diocese]%' OR diocese_name LIKE '%[diocese]%') LIMIT 1.
+47. Listing all Dioceses: SELECT diocese_name, bishop_name, established_date, city, phone, email FROM tabDiocese ORDER BY diocese_name ASC.
+48. Multi-Sacrament Counts / Summary: UNION ALL across tabBaptism, tabCommunion, tabConfirmation, tabMarriage, tabDeath, `tabAnointing Of Sick`.
+49. Family details by Family Card Number or Head Name:
+    - When asked for family details by card number (e.g. 'YLG/001' or '3165') or by Family Head name:
+      SELECT m.name AS member_id, CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS full_name, m.relationship_id AS relationship, m.gender, m.age, m.dob, m.mobile, f.family_card_number, f.parish_bcc_id AS anbiyam, f.street, f.city, m.parish_id FROM tabMember m JOIN tabFamily f ON m.family_id = f.name WHERE (f.name = '[card_or_id]' OR f.family_card_number = '[card_or_id]' OR f.family_head_name LIKE '%[name]%') AND f.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
+50. Sacraments of a specific person (Baptism, Communion, Confirmation, Marriage):
+    - Baptism: SELECT first_name, middle_name, last_name, dob, bapt_date, bapt_place, bapt_minister, father_name, mother_name, bapt_god_father, bapt_god_mother, family_card_no, bapt_parish_id FROM tabBaptism WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Name]%' OR first_name LIKE '%[First]%') AND parish_id = '{user_parish}'
+    - Confirmation: SELECT first_name, middle_name, last_name, dob, cnf_date, cnf_place, cnf_minister, sponsor, father_name, mother_name, family_card_no, cnf_parish_id FROM tabConfirmation WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Name]%' OR first_name LIKE '%[First]%') AND parish_id = '{user_parish}'
+    - Communion: SELECT first_name, middle_name, last_name, dob, fhc_date, fhc_place, fhc_minister, father_name, mother_name, family_card_no, fhc_parish_id FROM tabCommunion WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Name]%' OR first_name LIKE '%[First]%') AND parish_id = '{user_parish}'
+    - Marriage: SELECT bridegroom_name, bridegroom_middle_name, bridegroom_last_name, bride_name, bride_middle_name, bride_last_name, mrg_date, mrg_place, mrg_minister, witness1_name, witness2_name, mrg_parish_id FROM tabMarriage WHERE (bridegroom_name LIKE '%[Name]%' OR bride_name LIKE '%[Name]%') AND parish_id = '{user_parish}'
+51. Sacraments of an entire family / household:
+    - When asked for all sacraments received in a family or household:
+      SELECT m.name AS member_id, CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS full_name, m.relationship_id AS relationship, m.gender, m.age, m.dob, m.mobile, m.bapt_date AS baptism_date, m.fhc_date AS communion_date, m.cnf_date AS confirmation_date, m.mrg_date AS marriage_date, f.family_card_number, f.parish_bcc_id AS anbiyam, f.street, f.city, m.parish_id FROM tabMember m JOIN tabFamily f ON m.family_id = f.name WHERE m.family_id = (SELECT family_id FROM tabMember WHERE (CONCAT_WS(' ', first_name, middle_name, last_name) LIKE '%[Name]%' OR first_name LIKE '%[First]%') AND parish_id = '{user_parish}' LIMIT 1) AND m.parish_id = '{user_parish}' ORDER BY CASE WHEN m.relationship_id IN ('Self', 'Head', 'Husband') THEN 1 WHEN m.relationship_id = 'Wife' THEN 2 ELSE 3 END, m.dob ASC
+52. Listing members / members data retrieval (All scenarios):
+    - When user asks to 'list members', 'members data', 'members in [Anbiyam]', or 'உறுப்பினர்கள் பட்டியல்':
+    - NEVER select only first_name!
+    - ALWAYS select: CONCAT_WS(' ', m.first_name, m.middle_name, m.last_name) AS full_name, m.relationship_id AS relationship, m.gender, m.age, m.dob, m.mobile, f.family_card_number, f.parish_bcc_id AS anbiyam
+    - If filtered by Anbiyam: WHERE f.parish_bcc_id LIKE '%[Anbiyam Name]%' AND m.parish_id = '{user_parish}'
+    - If filtered by Family Heads: WHERE m.is_family_head = 'Yes' AND m.parish_id = '{user_parish}'
+    - If filtered by Gender: WHERE m.gender = 'Female' (or 'Male') AND m.parish_id = '{user_parish}'
+    - If filtered by Youth / Children: WHERE TIMESTAMPDIFF(YEAR, m.dob, CURDATE()) < 18 AND m.parish_id = '{user_parish}'
 
 ---
 ## STRICT OUTPUT RULES:
@@ -1516,6 +1558,8 @@ def validate_sql_node(state: GraphState) -> GraphState:
                     flags=re.IGNORECASE
                 )
 
+    # Normalize common phonetics/transliterations
+    sql = re.sub(r"\bAgnus\b", "Agnes", sql, flags=re.IGNORECASE)
     state = {**state, "generated_sql": sql}
 
 
@@ -1854,6 +1898,114 @@ def format_response_node(state: GraphState) -> GraphState:
                     ans += f"• **Diocese:** {dio} Diocese\n"
                 return {**state, "final_answer": ans}
 
+            # Check for Household / Family Members Registry Record (e.g. "family details of [Person]")
+            is_household_family = (
+                len(raw_results) >= 1 and
+                any(k in raw_results[0] for k in ["relationship", "relationship_id"]) and
+                any(k in raw_results[0] for k in ["family_card_number", "family_id", "family_card_no"]) and
+                len(set(str(r.get("family_card_number") or r.get("family_id") or r.get("family_card_no")) for r in raw_results if r.get("family_card_number") or r.get("family_id") or r.get("family_card_no"))) <= 1
+            )
+            if is_household_family:
+                q_orig = state.get("question") or ""
+                is_tam = bool(re.search(r'[\u0B80-\u0BFF]', q_orig)) or any(kw in q_orig.lower() for kw in ["tamil", "தமிழில்", "தமிழ்"])
+                
+                first_r = raw_results[0]
+                fc_val = first_r.get("family_card_number") or first_r.get("family_card_no") or first_r.get("family_id") or "-"
+                anbiyam_val = first_r.get("anbiyam") or first_r.get("parish_bcc_id") or "-"
+                parish_val = first_r.get("parish_id") or first_r.get("parish_name") or state.get("user_parish") or "-"
+                street_val = first_r.get("street") or ""
+                city_val = first_r.get("city") or ""
+                addr_val = f"{street_val}, {city_val}".strip(", ") or "-"
+                head_val = first_r.get("family_head_name") or ""
+                if not head_val:
+                    for r in raw_results:
+                        rel = str(r.get("relationship") or r.get("relationship_id") or "").lower()
+                        if rel in ["self", "head", "husband", "head of family"] or str(r.get("is_family_head")).lower() in ["1", "yes", "true"]:
+                            parts = [r.get("first_name"), r.get("middle_name"), r.get("last_name")]
+                            head_val = r.get("full_name") or " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip()
+                            break
+                if not head_val:
+                    head_val = "-"
+
+                def _fmt_date_str(val):
+                    if not val: return "-"
+                    if hasattr(val, "strftime"): return val.strftime("%d-%b-%Y")
+                    return str(val)
+
+                if is_tam:
+                    ans = f"### 👨‍👩‍👧‍👦 குடும்பப் பதிவு: குடும்ப அட்டை #{fc_val}\n\n"
+                    ans += "| 📜 குடும்ப விவரங்கள் | விவரம் |\n"
+                    ans += "| :--- | :--- |\n"
+                    ans += f"| **குடும்ப அட்டை எண்** | `{fc_val}` |\n"
+                    ans += f"| **குடும்பத் தலைவர்** | {head_val} |\n"
+                    ans += f"| **பங்கு** | {parish_val} |\n"
+                    ans += f"| **அன்பியம்** | {anbiyam_val} |\n"
+                    ans += f"| **முகவரி** | {addr_val} |\n\n"
+                    ans += f"#### 👥 குடும்ப உறுப்பினர்கள் ({len(raw_results)})\n\n"
+                    ans += "| பெயர் | உறவுமுறை | பாலினம் | வயது | பிறந்த தேதி | தொலைபேசி எண் |\n"
+                    ans += "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
+                    for r in raw_results:
+                        parts = [r.get("first_name"), r.get("middle_name"), r.get("last_name")]
+                        fn = r.get("full_name") or " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip() or "-"
+                        rel = r.get("relationship") or r.get("relationship_id") or "-"
+                        gen = r.get("gender") or "-"
+                        age_str = str(r.get("age")) if r.get("age") is not None else "-"
+                        dob_str = _fmt_date_str(r.get("dob"))
+                        mob = r.get("mobile") or r.get("phone") or "-"
+                        ans += f"| **{fn}** | {rel} | {gen} | {age_str} | {dob_str} | {mob} |\n"
+                else:
+                    ans = f"### 👨‍👩‍👧‍👦 Family Household Registry: Family Card #{fc_val}\n\n"
+                    ans += "| 📜 Family Registry | Details |\n"
+                    ans += "| :--- | :--- |\n"
+                    ans += f"| **Family Card Number** | `{fc_val}` |\n"
+                    ans += f"| **Head of Family** | {head_val} |\n"
+                    ans += f"| **Parish Church** | {parish_val} |\n"
+                    ans += f"| **BCC / Anbiyam** | {anbiyam_val} |\n"
+                    ans += f"| **Address / Street** | {addr_val} |\n\n"
+                    ans += f"#### 👥 Household Members ({len(raw_results)})\n\n"
+                    ans += "| Full Name | Relationship | Gender | Age | Date of Birth | Contact Number |\n"
+                    ans += "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
+                    for r in raw_results:
+                        parts = [r.get("first_name"), r.get("middle_name"), r.get("last_name")]
+                        fn = r.get("full_name") or " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip() or "-"
+                        rel = r.get("relationship") or r.get("relationship_id") or "-"
+                        gen = r.get("gender") or "-"
+                        age_str = str(r.get("age")) if r.get("age") is not None else "-"
+                        dob_str = _fmt_date_str(r.get("dob"))
+                        mob = r.get("mobile") or r.get("phone") or "-"
+                        ans += f"| **{fn}** | {rel} | {gen} | {age_str} | {dob_str} | {mob} |\n"
+
+                has_sacraments = any(k in first_r for k in ["baptism_date", "bapt_date", "communion_date", "fhc_date", "cnf_date", "confirmation_date", "mrg_date", "marriage_date"])
+                if has_sacraments:
+                    if is_tam:
+                        ans += "\n#### ✝️ திருவருட்சாதனங்கள் விவரம்\n\n"
+                        ans += "| பெயர் | உறவுமுறை | ஞானஸ்நானம் | புது நன்மை | உறுதிப்பூசுதல் | திருமணம் |\n"
+                        ans += "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
+                        for r in raw_results:
+                            parts = [r.get("first_name"), r.get("middle_name"), r.get("last_name")]
+                            fn = r.get("full_name") or " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip() or "-"
+                            rel = r.get("relationship") or r.get("relationship_id") or "-"
+                            b_d = _fmt_date_str(r.get("baptism_date") or r.get("bapt_date"))
+                            c_d = _fmt_date_str(r.get("communion_date") or r.get("fhc_date"))
+                            cnf_d = _fmt_date_str(r.get("confirmation_date") or r.get("cnf_date"))
+                            m_d = _fmt_date_str(r.get("marriage_date") or r.get("mrg_date"))
+                            ans += f"| **{fn}** | {rel} | {b_d} | {c_d} | {cnf_d} | {m_d} |\n"
+                    else:
+                        ans += "\n#### ✝️ Holy Sacraments History\n\n"
+                        ans += "| Full Name | Relationship | Baptism | First Communion | Confirmation | Holy Matrimony |\n"
+                        ans += "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
+                        for r in raw_results:
+                            parts = [r.get("first_name"), r.get("middle_name"), r.get("last_name")]
+                            fn = r.get("full_name") or " ".join([str(p).strip() for p in parts if p and str(p).strip() not in ("", "None", "null", "NULL")]).strip() or "-"
+                            rel = r.get("relationship") or r.get("relationship_id") or "-"
+                            b_d = _fmt_date_str(r.get("baptism_date") or r.get("bapt_date"))
+                            c_d = _fmt_date_str(r.get("communion_date") or r.get("fhc_date"))
+                            cnf_d = _fmt_date_str(r.get("confirmation_date") or r.get("cnf_date"))
+                            m_d = _fmt_date_str(r.get("marriage_date") or r.get("mrg_date"))
+                            ans += f"| **{fn}** | {rel} | {b_d} | {c_d} | {cnf_d} | {m_d} |\n"
+                
+                return {**state, "final_answer": ans}
+
             # Check for Parish Profile & History (Strictly for tabParish)
             table_match = re.search(r'FROM\s+`?(tab[A-Za-z0-9_ ]+)`?', state.get("generated_sql", ""), re.IGNORECASE)
             sql_table = table_match.group(1).strip().strip('`') if table_match else ""
@@ -1978,10 +2130,15 @@ def format_response_node(state: GraphState) -> GraphState:
             field_weights = {
                 # Names & Canonical Identifiers
                 'full_name': 0, 'first_name': 1, 'middle_name': 2, 'last_name': 3,
+                'relationship': 4, 'relationship_id': 4,
+                'gender': 5, 'age': 6, 'dob': 7,
+                'mobile': 8, 'phone': 9,
+                'anbiyam': 10, 'parish_bcc_id': 10,
+                'family_card_number': 11, 'family_card_no': 11, 'family_register_number': 11,
+                'family_head': 12, 'family_head_name': 12,
                 'diocese_name': 1, 'vicariate_name': 1, 'parish_name': 1, 'family_name': 1,
                 'fhc_parish_id': 1, 'bapt_parish_id': 1, 'mrg_parish_id': 1, 'cnf_parish_id': 1, 'death_parish_id': 1, 'parish_id': 1,
-                'family_card_no': 2, 'family_register_number': 2,
-                'bishop_name': 2, 'vicar_forane': 2, 'parish_priest': 2, 'family_head': 2,
+                'bishop_name': 2, 'vicar_forane': 2, 'parish_priest': 2,
                 'bridegroom_name': 1, 'bride_name': 2, 'witness1_name': 4, 'witness2_name': 5,
                 
                 # Codes & IDs
@@ -2387,9 +2544,9 @@ def format_response_node(state: GraphState) -> GraphState:
                     
             # Format 3: Multiple Rows (Markdown Table with Disambiguation Context)
             else:
-                # Enforce a maximum of 5 columns to prevent UI overflow
-                if len(headers) > 5:
-                    headers = headers[:5]
+                # Enforce a maximum of 8 columns to prevent UI overflow while showing rich details
+                if len(headers) > 8:
+                    headers = headers[:8]
                     
                 def _fmt_val(v):
                     if v is None or str(v).strip() in ("", "None", "null", "NULL", "undefined"):
