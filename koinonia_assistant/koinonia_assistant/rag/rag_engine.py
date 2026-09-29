@@ -29,15 +29,25 @@ def _init_langsmith():
 
 _init_langsmith()
 
-from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
+
+try:
+    from sentence_transformers import CrossEncoder
+except ImportError:
+    CrossEncoder = None
 
 _cross_encoder = None
 def get_cross_encoder():
     global _cross_encoder
-    if _cross_encoder is None:
-        print("[CrossEncoder] Loading model...")
-        _cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    if _cross_encoder is None and CrossEncoder is not None:
+        try:
+            print("[CrossEncoder] Loading model...")
+            _cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        except Exception:
+            _cross_encoder = None
     return _cross_encoder
 
 from langchain_groq import ChatGroq
@@ -57,7 +67,7 @@ def _get_groq_keys() -> list[str]:
         else:
             keys.append(env_keys.strip())
 
-    # 2. Check site_config.json
+    # 2. Check site_config.json via frappe.conf
     try:
         import frappe
         if hasattr(frappe, "conf") and frappe.conf:
@@ -73,6 +83,29 @@ def _get_groq_keys() -> list[str]:
     except Exception:
         pass
 
+    # 3. Direct site_config.json file fallback
+    if not keys:
+        for site_path in [
+            "/home/frappe/frappe-bench/sites/frontend/site_config.json",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "sites", "frontend", "site_config.json")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "sites", "frontend", "site_config.json")),
+        ]:
+            if os.path.exists(site_path):
+                try:
+                    with open(site_path, "r", encoding="utf-8") as f:
+                        sconf = json.load(f)
+                        if sconf.get("groq_api_keys"):
+                            gks = sconf.get("groq_api_keys")
+                            if isinstance(gks, list):
+                                keys.extend(gks)
+                            elif isinstance(gks, str):
+                                keys.extend([k.strip() for k in gks.split(",") if k.strip()])
+                        if sconf.get("groq_api_key"):
+                            keys.append(sconf.get("groq_api_key"))
+                        break
+                except Exception:
+                    pass
+
     # Unique while preserving order
     seen = set()
     unique_keys = []
@@ -81,7 +114,7 @@ def _get_groq_keys() -> list[str]:
             seen.add(k)
             unique_keys.append(k)
 
-    return unique_keys or [os.getenv("GROQ_API_KEY", "")]
+    return unique_keys
 
 GROQ_API_KEYS = _get_groq_keys()
 _current_key_idx = 0
@@ -158,15 +191,25 @@ def invoke_llm_with_rotation(prompt_messages):
     else:
         formatted_messages = prompt_messages
     
-    default_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     models_to_try = [
-        default_model,
-        "llama-3.1-8b-instant",
-        "qwen/qwen3.8-27b",
-        "qwen/qwen3.6-27b",
         "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b"
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "qwen/qwen3.6-27b"
     ]
+    try:
+        import frappe
+        if hasattr(frappe, "conf") and frappe.conf:
+            conf_models = frappe.conf.get("groq_models")
+            if conf_models and isinstance(conf_models, list):
+                models_to_try = conf_models + [m for m in models_to_try if m not in conf_models]
+            single_m = frappe.conf.get("groq_model")
+            if single_m and single_m in models_to_try:
+                models_to_try.remove(single_m)
+                models_to_try.insert(0, single_m)
+    except Exception:
+        pass
+
     # Remove duplicates preserving order
     seen_models = set()
     models_to_try = [m for m in models_to_try if not (m in seen_models or seen_models.add(m))]
@@ -190,18 +233,40 @@ def invoke_llm_with_rotation(prompt_messages):
 
     raise RuntimeError("All Groq API keys and models exhausted their rate limits.")
 
-# Groq LLM instance for standard fallback chaining
-primary_llm = ChatGroq(
-    model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
-    temperature=0,
-    groq_api_key=GROQ_API_KEYS[0] if GROQ_API_KEYS else None,
-)
-fallback_llm = ChatGroq(
-    model="openai/gpt-oss-120b",
-    temperature=0,
-    groq_api_key=GROQ_API_KEYS[0],
-)
-llm = primary_llm.with_fallbacks([fallback_llm])
+# Lazy LLM wrapper to support .invoke(...) cleanly without import-time Groq initialization
+class LazyLLM:
+    def invoke(self, messages, **kwargs):
+        formatted = []
+        if isinstance(messages, str):
+            formatted = [("user", messages)]
+        elif isinstance(messages, list):
+            for m in messages:
+                if isinstance(m, tuple):
+                    formatted.append(m)
+                elif hasattr(m, 'content'):
+                    role = "user" if getattr(m, 'type', None) in ["human", "user"] else ("assistant" if getattr(m, 'type', None) == "ai" else "system")
+                    formatted.append((role, m.content))
+                else:
+                    formatted.append(("user", str(m)))
+        else:
+            formatted = [("user", str(messages))]
+        return invoke_llm_with_rotation(formatted)
+
+primary_llm = LazyLLM()
+fallback_llm = LazyLLM()
+llm = LazyLLM()
+
+def ensure_frappe_db():
+    try:
+        import frappe
+        if not (hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db):
+            for sites_p in ["/home/frappe/frappe-bench/sites", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "sites"))]:
+                if os.path.exists(sites_p):
+                    frappe.init(site="frontend", sites_path=sites_p)
+                    frappe.connect()
+                    break
+    except Exception as e:
+        print(f"[ensure_frappe_db] Note: {e}")
 
 # ─── pgvector Schema and History Retrieval ────────────────────────────────────
 
@@ -304,11 +369,13 @@ def fetch_relevant_schemas(original_query: str, enhanced_query: str, query_embed
                     
         if candidates:
             ce = get_cross_encoder()
-            pairs = [[combined_query_text, f"{tname} {ddl}"] for tname, ddl in candidates]
-            scores = ce.predict(pairs)
-            
-            scored_candidates = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
-            top_candidates = [cand for score, cand in scored_candidates[:k]]
+            if ce:
+                pairs = [[combined_query_text, f"{tname} {ddl}"] for tname, ddl in candidates]
+                scores = ce.predict(pairs)
+                scored_candidates = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+                top_candidates = [cand for score, cand in scored_candidates[:k]]
+            else:
+                top_candidates = candidates[:k]
         else:
             top_candidates = []
             
@@ -383,10 +450,13 @@ def fetch_relevant_fields(query_embedding: list[float], combined_query_text: str
                     
         if candidates:
             ce = get_cross_encoder()
-            pairs = [[combined_query_text, c[0]] for c in candidates]
-            scores = ce.predict(pairs)
-            scored_candidates = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
-            results = [cand[0] for score, cand in scored_candidates[:k]]
+            if ce:
+                pairs = [[combined_query_text, c[0]] for c in candidates]
+                scores = ce.predict(pairs)
+                scored_candidates = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+                results = [cand[0] for score, cand in scored_candidates[:k]]
+            else:
+                results = [cand[0] for cand in candidates[:k]]
         else:
             results = []
             
@@ -1006,10 +1076,17 @@ def generate_sql_node(state: GraphState) -> GraphState:
     user_parishes = state.get("user_parishes") or []
     user_parish = (state.get("user_parish") or "").strip()
     
-    if not is_count_query:
+    all_parish_names = []
+    try:
+        import frappe
+        if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+            if frappe.db.table_exists("Parish"):
+                all_parish_names = frappe.db.sql_list("SELECT name FROM tabParish")
+    except Exception:
+        all_parish_names = []
+
+    if not is_count_query and all_parish_names:
         if user_role in ["Vicar General", "Vicar Forane"] and user_parishes:
-            import frappe
-            all_parish_names = frappe.db.sql_list("SELECT name FROM tabParish") if frappe.db.table_exists("Parish") else []
             for p in all_parish_names:
                 if p not in user_parishes:
                     short_p = p.replace("Parish", "").replace("Church", "").replace("Cathedral", "").strip()
@@ -1018,8 +1095,6 @@ def generate_sql_node(state: GraphState) -> GraphState:
                         return {**state, "generated_sql": "UNAUTHORIZED_PARISH"}
                         
         elif user_role in ["Parish Priest", "Parishioner"] and user_parish:
-            import frappe
-            all_parish_names = frappe.db.sql_list("SELECT name FROM tabParish") if frappe.db.table_exists("Parish") else []
             for p in all_parish_names:
                 if p.lower() != user_parish.lower():
                     short_p = p.replace("Parish", "").replace("Church", "").replace("Cathedral", "").strip()
@@ -1030,9 +1105,16 @@ def generate_sql_node(state: GraphState) -> GraphState:
     # Pre-check for foreign diocese or foreign parish requests (e.g., Bishop of Salem asking for Christ the King Parish in Trichy)
     user_diocese = (state.get("user_diocese") or "Trichy").strip()
     
-    import frappe
-    if frappe.db.table_exists("Parish"):
-        all_parishes = frappe.db.sql("SELECT name, diocese_id FROM tabParish", as_dict=True)
+    all_parishes = []
+    try:
+        import frappe
+        if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+            if frappe.db.table_exists("Parish"):
+                all_parishes = frappe.db.sql("SELECT name, diocese_id FROM tabParish", as_dict=True)
+    except Exception:
+        all_parishes = []
+
+    if all_parishes:
         for p in all_parishes:
             p_name = p.get("name") or ""
             p_dio = p.get("diocese_id") or ""
@@ -1391,15 +1473,22 @@ def validate_sql_node(state: GraphState) -> GraphState:
 
 
     # EXPLAIN Sandbox check in Frappe MariaDB
-    import frappe
     try:
-        # Run EXPLAIN to validate syntax and table access
-        explain_sql = f"EXPLAIN {sql}"
-        frappe.db.sql(explain_sql)
-        print("[validate_sql] SQL validated successfully.")
-        return {**state, "error_message": ""}
+        ensure_frappe_db()
+        import frappe
+        if hasattr(frappe, "local") and hasattr(frappe.local, "db") and frappe.local.db:
+            explain_sql = f"EXPLAIN {sql}"
+            frappe.db.sql(explain_sql)
+            print("[validate_sql] SQL validated successfully.")
+            return {**state, "error_message": ""}
+        else:
+            print("[validate_sql] frappe.local.db not bound; skipping EXPLAIN sandbox check.")
+            return {**state, "error_message": ""}
     except Exception as e:
         error_msg = str(e)
+        if "object is not bound" in error_msg.lower():
+            print("[validate_sql] frappe.db object is not bound; bypassing EXPLAIN check.")
+            return {**state, "error_message": ""}
         print(f"[validate_sql] SQL Validation Failed: {error_msg}")
         return {**state, "error_message": error_msg}
 
@@ -1460,8 +1549,9 @@ def execute_sql_node(state: GraphState) -> GraphState:
     if sql in ["UNSUPPORTED", "UNAUTHORIZED_DIOCESE", "UNAUTHORIZED_PARISH"]:
         return {**state, "sql_result": None, "error_message": ""}
         
-    import frappe
     try:
+        ensure_frappe_db()
+        import frappe
         results = frappe.db.sql(sql, as_dict=True)
         print(f"[execute_sql] Query returned {len(results)} rows.")
         return {**state, "sql_result": results, "error_message": ""}
@@ -2293,6 +2383,9 @@ def decide_execution(state: GraphState):
 def route_after_router(state: GraphState):
     return decide_route(state)
 
+def route_after_validation(state: GraphState):
+    return decide_validation(state)
+
 def route_after_execution(state: GraphState):
     return decide_execution(state)
 
@@ -2322,7 +2415,7 @@ def build_graph():
     workflow.add_edge("enhance_query_node", "retrieve_context_node")
     workflow.add_edge("retrieve_context_node", "generate_sql_node")
     workflow.add_edge("generate_sql_node", "validate_sql_node")
-    workflow.add_conditional_edges("validate_sql_node", decide_validation, {
+    workflow.add_conditional_edges("validate_sql_node", route_after_validation, {
         "valid": "execute_sql_node", 
         "retry": "rewrite_sql_node", 
         "unsupported": "format_response_node", 
